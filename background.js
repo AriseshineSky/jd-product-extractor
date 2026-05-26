@@ -2,6 +2,56 @@
 const DETAIL_STORAGE_KEY = "jd_jsonl_records";
 /** 搜索页收集的商品链接队列（导出为 jd-links-*.jsonl） */
 const LINK_STORAGE_KEY = "jd_product_url_queue";
+/** 验证/跳转首页后可恢复的抓取进度 */
+const CHECKPOINT_STORAGE_KEY = "jd_crawl_checkpoint";
+
+function isJdRiskUrl(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  if (/(passport|aq)\.jd\.com/.test(lower)) return true;
+  if (lower.includes("cfe.m.jd.com") || lower.includes("risk_handler")) return true;
+  return false;
+}
+
+function isJdHomeUrl(url) {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.toLowerCase();
+    if (host !== "www.jd.com" && host !== "jd.com") return false;
+    const path = (u.pathname || "/").replace(/\/+$/, "") || "/";
+    return path === "/";
+  } catch (_) {
+    return false;
+  }
+}
+
+function isJdBlockedUrl(url) {
+  return isJdRiskUrl(url) || isJdHomeUrl(url);
+}
+
+async function loadCheckpoint() {
+  const stored = await chrome.storage.local.get(CHECKPOINT_STORAGE_KEY);
+  const cp = stored[CHECKPOINT_STORAGE_KEY];
+  return cp && typeof cp === "object" ? cp : null;
+}
+
+async function saveCheckpoint(checkpoint) {
+  await chrome.storage.local.set({
+    [CHECKPOINT_STORAGE_KEY]: {
+      ...checkpoint,
+      updated_at: new Date().toISOString(),
+    },
+  });
+}
+
+async function mergeCheckpoint(patch) {
+  const prev = (await loadCheckpoint()) || {};
+  await saveCheckpoint({ ...prev, ...patch });
+}
+
+async function clearCheckpoint() {
+  await chrome.storage.local.remove(CHECKPOINT_STORAGE_KEY);
+}
 
 async function loadDetailRecords() {
   const stored = await chrome.storage.local.get(DETAIL_STORAGE_KEY);
@@ -65,6 +115,67 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 长时间任务（批量详情、深度抓取、翻页缓存）的暂停/结束状态 */
+const crawlJob = {
+  active: false,
+  paused: false,
+  stopped: false,
+  kind: null,
+  tabId: null,
+};
+
+function getCrawlJobState() {
+  return {
+    active: crawlJob.active,
+    paused: crawlJob.paused,
+    stopped: crawlJob.stopped,
+    kind: crawlJob.kind,
+    tabId: crawlJob.tabId,
+  };
+}
+
+function broadcastCrawlJobState() {
+  const state = getCrawlJobState();
+  chrome.runtime.sendMessage({ type: "CRAWL_JOB_STATE_CHANGED", state }).catch(() => {});
+}
+
+function crawlJobStart(kind, tabId) {
+  crawlJob.active = true;
+  crawlJob.paused = false;
+  crawlJob.stopped = false;
+  crawlJob.kind = kind;
+  crawlJob.tabId = tabId ?? null;
+  broadcastCrawlJobState();
+}
+
+function crawlJobEnd() {
+  crawlJob.active = false;
+  crawlJob.paused = false;
+  crawlJob.stopped = false;
+  crawlJob.kind = null;
+  crawlJob.tabId = null;
+  broadcastCrawlJobState();
+}
+
+function crawlJobPause() {
+  if (!crawlJob.active) return;
+  crawlJob.paused = true;
+  broadcastCrawlJobState();
+}
+
+function crawlJobResume() {
+  if (!crawlJob.active) return;
+  crawlJob.paused = false;
+  broadcastCrawlJobState();
+}
+
+function crawlJobStop() {
+  if (!crawlJob.active) return;
+  crawlJob.stopped = true;
+  crawlJob.paused = false;
+  broadcastCrawlJobState();
+}
+
 function waitForTabComplete(tabId, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -116,11 +227,24 @@ async function appendProductUrls(entries) {
   };
 }
 
+function riskBlockedError(url) {
+  const err = new Error(
+    "详情页被重定向到验证/登录或首页: " + String(url || "").slice(0, 120)
+  );
+  err.code = "JD_RISK_BLOCKED";
+  return err;
+}
+
 async function extractProductInNewTab(url, options = {}) {
   const tab = await chrome.tabs.create({ url, active: options.activateTab === true });
   try {
     await waitForTabComplete(tab.id, options.tabTimeoutMs || 60000);
     await sleep(options.afterLoadMs || 2500);
+
+    const tabInfo = await chrome.tabs.get(tab.id);
+    if (isJdBlockedUrl(tabInfo.url) || isJdRiskUrl(tabInfo.url)) {
+      throw riskBlockedError(tabInfo.url);
+    }
 
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -172,6 +296,22 @@ async function extractProductInNewTab(url, options = {}) {
   }
 }
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!crawlJob.active || tabId !== crawlJob.tabId) return;
+  if (changeInfo.status !== "complete" && changeInfo.url === undefined) return;
+  const url = changeInfo.url || tab?.url || "";
+  if (!isJdBlockedUrl(url)) return;
+
+  crawlJobPause();
+  chrome.tabs
+    .sendMessage(tabId, {
+      type: "CRAWL_BLOCKED_BY_RISK",
+      url,
+      reason: isJdHomeUrl(url) ? "home" : "risk",
+    })
+    .catch(() => {});
+});
+
 chrome.runtime.onInstalled.addListener(() => {
   console.log("JD Product Extractor installed");
 });
@@ -215,6 +355,34 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "EXTRACT_URL_IN_NEW_TAB") {
     extractProductInNewTab(message.url, message.options || {})
       .then((result) => sendResponse(result))
+      .catch((error) =>
+        sendResponse({
+          ok: false,
+          error: String(error.message || error),
+          code: error.code || undefined,
+        })
+      );
+    return true;
+  }
+
+  if (message?.type === "GET_CRAWL_CHECKPOINT") {
+    loadCheckpoint()
+      .then((checkpoint) => sendResponse({ ok: true, checkpoint }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+
+  if (message?.type === "MERGE_CRAWL_CHECKPOINT") {
+    mergeCheckpoint(message.patch || {})
+      .then(() => loadCheckpoint())
+      .then((checkpoint) => sendResponse({ ok: true, checkpoint }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+
+  if (message?.type === "CLEAR_CRAWL_CHECKPOINT") {
+    clearCheckpoint()
+      .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }
@@ -238,6 +406,44 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     saveDetailRecords([])
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+
+  if (message?.type === "CRAWL_JOB_START") {
+    crawlJobStart(message.kind || "unknown", message.tabId);
+    sendResponse({ ok: true, state: getCrawlJobState() });
+    return true;
+  }
+
+  if (message?.type === "CRAWL_JOB_END") {
+    crawlJobEnd();
+    if (message.clearCheckpoint !== false) {
+      clearCheckpoint().catch(() => {});
+    }
+    sendResponse({ ok: true, state: getCrawlJobState() });
+    return true;
+  }
+
+  if (message?.type === "CRAWL_JOB_PAUSE") {
+    crawlJobPause();
+    sendResponse({ ok: true, state: getCrawlJobState() });
+    return true;
+  }
+
+  if (message?.type === "CRAWL_JOB_RESUME") {
+    crawlJobResume();
+    sendResponse({ ok: true, state: getCrawlJobState() });
+    return true;
+  }
+
+  if (message?.type === "CRAWL_JOB_STOP") {
+    crawlJobStop();
+    sendResponse({ ok: true, state: getCrawlJobState() });
+    return true;
+  }
+
+  if (message?.type === "GET_CRAWL_JOB_STATE") {
+    sendResponse({ ok: true, state: getCrawlJobState() });
     return true;
   }
 

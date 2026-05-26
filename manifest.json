@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JD Product Extractor",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "description": "Extract JD item and search page product data into StandardProduct-compatible JSON.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
@@ -13,6 +13,9 @@
     "https://item.jingxi.com/*",
     "https://api.m.jd.com/*",
     "https://club.jd.com/*",
+    "https://www.jd.com/*",
+    "https://passport.jd.com/*",
+    "https://aq.jd.com/*",
     "https://*.360buyimg.com/*",
     "https://vod.jd.com/*"
   ],
@@ -28,6 +31,7 @@
       "matches": ["https://search.jd.com/*", "https://list.jd.com/*"],
       "js": [
         "src/jd-page-url.js",
+        "src/jd-risk.js",
         "src/human-scroll.js",
         "src/human-mouse.js",
         "src/search-extractor.js",

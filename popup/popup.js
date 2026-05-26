@@ -6,6 +6,7 @@ const downloadLinksBtn = document.getElementById("download-links-btn");
 const clearDetailBtn = document.getElementById("clear-detail-btn");
 const clearLinksBtn = document.getElementById("clear-links-btn");
 const statusEl = document.getElementById("status");
+const cacheStatusEl = document.getElementById("cache-status");
 const outputEl = document.getElementById("output");
 const hintEl = document.querySelector(".hint");
 const pageModeEl = document.getElementById("page-mode");
@@ -18,6 +19,9 @@ const detailDelayInput = document.getElementById("detail-delay");
 const cacheUrlsBtn = document.getElementById("cache-urls-btn");
 const batchDetailBtn = document.getElementById("batch-detail-btn");
 const deepCrawlBtn = document.getElementById("deep-crawl-btn");
+const jobControlsEl = document.getElementById("job-controls");
+const pauseJobBtn = document.getElementById("pause-job-btn");
+const stopJobBtn = document.getElementById("stop-job-btn");
 
 let lastPayload = null;
 let lastMode = "item";
@@ -228,6 +232,45 @@ function setBusy(busy) {
   if (deepCrawlBtn) deepCrawlBtn.disabled = busy;
 }
 
+async function getCrawlJobState() {
+  try {
+    const res = await chrome.runtime.sendMessage({ type: "GET_CRAWL_JOB_STATE" });
+    return res?.state || { active: false, paused: false, stopped: false };
+  } catch (_) {
+    return { active: false, paused: false, stopped: false };
+  }
+}
+
+function updateJobControlsUi(state) {
+  const active = !!state?.active;
+  if (jobControlsEl) jobControlsEl.hidden = !active;
+  if (pauseJobBtn) {
+    pauseJobBtn.disabled = !active;
+    pauseJobBtn.textContent = state?.paused ? "继续" : "暂停";
+  }
+  if (stopJobBtn) stopJobBtn.disabled = !active;
+
+  if (active) {
+    if (cacheUrlsBtn) cacheUrlsBtn.disabled = true;
+    if (batchDetailBtn) batchDetailBtn.disabled = true;
+    if (deepCrawlBtn) deepCrawlBtn.disabled = true;
+  }
+}
+
+async function syncJobControlsFromBackground() {
+  const state = await getCrawlJobState();
+  updateJobControlsUi(state);
+  if (!state.active) {
+    const tab = await getActiveTab();
+    const busy = false;
+    if (detectMode(tab?.url) === "list") {
+      if (cacheUrlsBtn) cacheUrlsBtn.disabled = busy;
+      if (batchDetailBtn) batchDetailBtn.disabled = busy;
+      if (deepCrawlBtn) deepCrawlBtn.disabled = busy;
+    }
+  }
+}
+
 async function runItemExtract({ download }) {
   const tab = await getActiveTab();
   updateUiForTab(tab);
@@ -270,10 +313,11 @@ async function refreshCacheStatus() {
     chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" }),
     chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" }),
   ]);
-  const parts = [];
-  if (details?.ok && details.count) parts.push(`详情 ${details.count} 条`);
-  if (links?.ok && links.count) parts.push(`链接 ${links.count} 条`);
-  if (parts.length) setStatus(`当前缓存：${parts.join("，")}`, "");
+  const detailCount = details?.ok ? details.count : 0;
+  const linkCount = links?.ok ? links.count : 0;
+  if (cacheStatusEl) {
+    cacheStatusEl.textContent = `当前缓存：详情 ${detailCount} 条，链接队列 ${linkCount} 条`;
+  }
 }
 
 if (extractOnlyBtn) {
@@ -471,6 +515,7 @@ async function syncUiToActiveTab() {
   const tab = await getActiveTab();
   updateUiForTab(tab);
   await refreshCacheStatus();
+  await syncJobControlsFromBackground();
 }
 
 function bindTabRefresh() {
@@ -485,6 +530,39 @@ function bindTabRefresh() {
   });
 }
 
+if (pauseJobBtn) {
+  pauseJobBtn.addEventListener("click", async () => {
+    const state = await getCrawlJobState();
+    if (!state.active) return;
+    if (state.paused) {
+      await chrome.runtime.sendMessage({ type: "CRAWL_JOB_RESUME" });
+      setStatus("已继续任务", "ok");
+    } else {
+      await chrome.runtime.sendMessage({ type: "CRAWL_JOB_PAUSE" });
+      setStatus("已暂停，点击「继续」恢复", "ok");
+    }
+    await syncJobControlsFromBackground();
+  });
+}
+
+if (stopJobBtn) {
+  stopJobBtn.addEventListener("click", async () => {
+    const state = await getCrawlJobState();
+    if (!state.active) return;
+    await chrome.runtime.sendMessage({ type: "CRAWL_JOB_STOP" });
+    setStatus("正在结束任务…", "ok");
+    await syncJobControlsFromBackground();
+  });
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === "CRAWL_JOB_STATE_CHANGED") {
+    updateJobControlsUi(message.state);
+    syncJobControlsFromBackground();
+  }
+});
+
 loadSearchSettings();
 bindTabRefresh();
 syncUiToActiveTab();
+syncJobControlsFromBackground();

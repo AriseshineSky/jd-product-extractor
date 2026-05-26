@@ -31,6 +31,10 @@
       <button id="batch-detail-btn" type="button" class="purple">批量详情提取</button>
       <button id="deep-crawl-btn" type="button" class="green">逐一点开详情提取</button>
     </div>
+    <div id="job-controls" class="actions job-controls" hidden>
+      <button id="pause-job-btn" type="button" class="amber">暂停</button>
+      <button id="stop-job-btn" type="button" class="warn">结束</button>
+    </div>
     <div class="actions secondary cache-actions">
       <button id="download-detail-btn" type="button">下载详情 JSONL</button>
       <button id="download-links-btn" type="button">下载链接 JSONL</button>
@@ -39,6 +43,7 @@
       <button id="clear-detail-btn" type="button" class="ghost">清空详情缓存</button>
       <button id="clear-links-btn" type="button" class="ghost" hidden>清空链接缓存</button>
     </div>
+    <p id="cache-status" class="cache-status">当前缓存：详情 0 条，链接队列 0 条</p>
     <p id="status" class="status"></p>
     <pre id="output" class="output" aria-live="polite"></pre>
     <script src="../src/jd-page-url.js"></script>

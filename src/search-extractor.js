@@ -342,6 +342,8 @@
     let pagesDone = 0;
 
     for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+      if (options.onPageCheckpoint) await options.onPageCheckpoint(pageNum);
+
       const batch = await collectUrlsFromSearchPage({
         ...options,
         keyword,
@@ -356,6 +358,8 @@
 
       if (pageNum >= maxPages) break;
       if (!isNextPageAvailable()) break;
+
+      if (options.onPageCheckpoint) await options.onPageCheckpoint(pageNum);
 
       const skusBefore = new Set(seenSkus);
       await clickNextPage();
