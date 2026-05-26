@@ -367,63 +367,203 @@
     return sanitizeDescriptionHtml(html);
   }
 
-  function sanitizeDescriptionHtml(html) {
-    if (!html) return "";
-    const doc = new DOMParser().parseFromString(html, "text/html");
+  function normalizeDescriptionAssetUrl(raw) {
+    if (!raw) return null;
+    let src = String(raw).trim();
+    if (src.startsWith("//")) src = "https:" + src;
+    else if (src.startsWith("http://")) src = "https://" + src.slice(7);
+    else if (!/^https?:\/\//i.test(src)) return null;
+    return src.split("?")[0];
+  }
 
-    doc.querySelectorAll("script, style, link, noscript, iframe").forEach((node) => node.remove());
+  /** 从 <style> 中的 .M* 规则提取 background-image，写入对应空 div */
+  function injectBackgroundImagesFromStyleTags(doc) {
+    const classToUrl = new Map();
+    doc.querySelectorAll("style").forEach((styleEl) => {
+      const text = styleEl.textContent || "";
+      const re =
+        /\.(M[\w]+)\b[^{]*\{[^}]*background(?:-image)?\s*:\s*[^;]*url\s*\(\s*['"]?([^'")]+)/gi;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        if (!classToUrl.has(m[1])) classToUrl.set(m[1], m[2]);
+      }
+    });
 
-    doc.querySelectorAll("*").forEach((el) => {
-      el.removeAttribute("style");
-      [...el.attributes].forEach((attr) => {
-        if (/^on/i.test(attr.name)) el.removeAttribute(attr.name);
+    classToUrl.forEach((url, className) => {
+      doc.querySelectorAll(`.${className}`).forEach((el) => {
+        if (el.querySelector("img[src]")) return;
+        const text = (el.textContent || "").replace(/\s|\u00a0/g, "");
+        if (text) return;
+        const src = normalizeDescriptionAssetUrl(url);
+        if (!src) return;
+        const img = doc.createElement("img");
+        img.setAttribute("src", src);
+        img.setAttribute("alt", "");
+        el.appendChild(img);
       });
     });
+  }
 
-    doc.querySelectorAll("a").forEach((node) => {
-      node.replaceWith(doc.createTextNode(node.textContent || ""));
+  function injectBackgroundImagesFromInlineStyle(doc) {
+    doc.querySelectorAll("[style]").forEach((el) => {
+      const style = el.getAttribute("style") || "";
+      const match = style.match(/background(?:-image)?\s*:\s*[^;]*url\s*\(\s*['"]?([^'")]+)/i);
+      if (!match) return;
+      if (el.querySelector("img[src]")) return;
+      const text = (el.textContent || "").replace(/\s|\u00a0/g, "");
+      if (text) return;
+      const src = normalizeDescriptionAssetUrl(match[1]);
+      if (!src) return;
+      const img = doc.createElement("img");
+      img.setAttribute("src", src);
+      img.setAttribute("alt", "");
+      el.appendChild(img);
     });
+  }
 
+  /** 保留 <a> 内 HTML，去掉链接，改为 <span> */
+  function unwrapAnchorsToPlainTags(doc) {
+    doc.querySelectorAll("a").forEach((a) => {
+      const span = doc.createElement("span");
+      span.innerHTML = a.innerHTML;
+      a.replaceWith(span);
+    });
+  }
+
+  function removeDescriptionJunk(doc) {
+    const junkSelectors = [
+      "script",
+      "style",
+      "link",
+      "noscript",
+      "iframe",
+      "meta",
+      "input",
+      "textarea",
+      "button",
+      "svg",
+      "#zbViewModulesH",
+      "#zbViewModulesHeight",
+      '[id^="zbViewFloorHeight_"]',
+      "[cssurl]",
+      ".quality-life-exposure-placeholder",
+      "#event-zone",
+      "#related-layout-head",
+      "#related-layout-footer",
+    ];
+    junkSelectors.forEach((sel) => {
+      doc.querySelectorAll(sel).forEach((n) => n.remove());
+    });
+  }
+
+  function stripDescriptionAttributes(doc) {
+    doc.querySelectorAll("*").forEach((el) => {
+      [...el.attributes].forEach((attr) => {
+        const name = attr.name;
+        if (/^on/i.test(name)) el.removeAttribute(name);
+        else if (name === "style" || name === "cssurl" || name === "skudesign") el.removeAttribute(name);
+        else if (name.startsWith("data-")) el.removeAttribute(name);
+        else if (name.includes("web-inspector")) el.removeAttribute(name);
+        else if (name === "href" || name === "target" || name === "rel") el.removeAttribute(name);
+      });
+    });
+  }
+
+  function normalizeDescriptionImages(doc) {
     doc.querySelectorAll("img").forEach((img) => {
       const raw =
         img.getAttribute("src") ||
         img.getAttribute("data-src") ||
         img.getAttribute("data-savepage-src");
-      if (!raw || raw.startsWith("data:")) {
+      const src = normalizeDescriptionAssetUrl(raw);
+      if (!src || (raw && String(raw).startsWith("data:"))) {
         img.remove();
         return;
       }
-      let src = raw;
-      if (src.startsWith("//")) src = "https:" + src;
-      else if (src.startsWith("http://")) src = "https://" + src.slice(7);
-      img.setAttribute("src", src.split("?")[0]);
-      img.removeAttribute("style");
+      img.setAttribute("src", src);
+      [...img.attributes].forEach((attr) => {
+        if (attr.name !== "src" && attr.name !== "alt") img.removeAttribute(attr.name);
+      });
     });
+  }
 
-    return doc.body.innerHTML.trim();
+  function pruneEmptyDescriptionNodes(doc) {
+    const hasContent = (el) => {
+      const text = (el.textContent || "").replace(/\s|\u00a0/g, "");
+      return !!text || !!el.querySelector("img[src]");
+    };
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const nodes = [...doc.body.querySelectorAll("*")];
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const el = nodes[i];
+        if (el === doc.body) continue;
+        if (el.tagName === "IMG") {
+          if (!el.getAttribute("src")) {
+            el.remove();
+            changed = true;
+          }
+          continue;
+        }
+        if (el.tagName === "BR" || el.tagName === "HR") continue;
+        if (!hasContent(el)) {
+          el.remove();
+          changed = true;
+        }
+      }
+    }
+
+    while (doc.body.firstChild?.nodeName === "BR") doc.body.firstChild.remove();
+    while (doc.body.lastChild?.nodeName === "BR") doc.body.lastChild.remove();
+  }
+
+  function sanitizeDescriptionHtml(html) {
+    if (!html) return "";
+    const doc = new DOMParser().parseFromString(html, "text/html");
+
+    injectBackgroundImagesFromStyleTags(doc);
+    injectBackgroundImagesFromInlineStyle(doc);
+    removeDescriptionJunk(doc);
+    unwrapAnchorsToPlainTags(doc);
+    normalizeDescriptionImages(doc);
+    stripDescriptionAttributes(doc);
+    pruneEmptyDescriptionNodes(doc);
+
+    let out = doc.body.innerHTML.trim();
+    out = out.replace(/>\s+</g, "><").replace(/(<br\s*\/?>){3,}/gi, "<br><br>");
+    return out;
   }
 
   function parseDescriptionFromDom() {
-    const selectors = [
-      "#detail-main",
-      "#J-detail-content",
-      "#detail-content",
-      ".detail-content-wrap",
-      "#product-detail .ssd-module-wrap",
-    ];
+    const roots = [];
+    const detailMain = document.querySelector("#detail-main");
+    if (detailMain) roots.push(detailMain);
+
+    if (!roots.length) {
+      const selectors = [
+        "#J-detail-content",
+        "#detail-content",
+        ".detail-content-wrap",
+        "#product-detail .ssd-module-wrap",
+      ];
+      for (const selector of selectors) {
+        document.querySelectorAll(selector).forEach((el) => roots.push(el));
+        if (roots.length) break;
+      }
+    }
+
     const seen = new Set();
     const parts = [];
 
-    for (const selector of selectors) {
-      document.querySelectorAll(selector).forEach((root) => {
-        const html = sanitizeDescriptionHtml(root.innerHTML);
-        if (!html || html.length < 20) return;
-        const key = html.replace(/\s+/g, " ").slice(0, 800);
-        if (seen.has(key)) return;
-        seen.add(key);
-        parts.push(html);
-      });
-      if (parts.length) break;
+    for (const root of roots) {
+      const html = sanitizeDescriptionHtml(root.innerHTML);
+      if (!html || html.length < 20) continue;
+      const key = html.replace(/\s+/g, " ").slice(0, 800);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      parts.push(html);
     }
 
     return parts.join("\n");

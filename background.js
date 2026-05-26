@@ -122,7 +122,18 @@ const crawlJob = {
   stopped: false,
   kind: null,
   tabId: null,
+  detailTabId: null,
 };
+
+function crawlJobUserStoppedError() {
+  const err = new Error("任务已结束");
+  err.code = "USER_STOPPED";
+  return err;
+}
+
+function assertCrawlJobNotStopped() {
+  if (crawlJob.stopped) throw crawlJobUserStoppedError();
+}
 
 function getCrawlJobState() {
   return {
@@ -145,6 +156,7 @@ function crawlJobStart(kind, tabId) {
   crawlJob.stopped = false;
   crawlJob.kind = kind;
   crawlJob.tabId = tabId ?? null;
+  crawlJob.detailTabId = null;
   broadcastCrawlJobState();
 }
 
@@ -154,6 +166,7 @@ function crawlJobEnd() {
   crawlJob.stopped = false;
   crawlJob.kind = null;
   crawlJob.tabId = null;
+  crawlJob.detailTabId = null;
   broadcastCrawlJobState();
 }
 
@@ -173,27 +186,61 @@ function crawlJobStop() {
   if (!crawlJob.active) return;
   crawlJob.stopped = true;
   crawlJob.paused = false;
+  if (crawlJob.detailTabId != null) {
+    chrome.tabs.remove(crawlJob.detailTabId).catch(() => {});
+    crawlJob.detailTabId = null;
+  }
   broadcastCrawlJobState();
+}
+
+async function sleepUnlessStopped(ms) {
+  const step = 250;
+  let remaining = ms;
+  while (remaining > 0) {
+    assertCrawlJobNotStopped();
+    const chunk = Math.min(step, remaining);
+    await sleep(chunk);
+    remaining -= chunk;
+  }
 }
 
 function waitForTabComplete(tabId, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
+    let pollTimer;
     const timer = setTimeout(() => {
       chrome.tabs.onUpdated.removeListener(listener);
+      if (pollTimer) clearInterval(pollTimer);
       reject(new Error("商品页加载超时"));
     }, timeoutMs);
+
+    pollTimer = setInterval(() => {
+      if (!crawlJob.stopped) return;
+      clearTimeout(timer);
+      clearInterval(pollTimer);
+      chrome.tabs.onUpdated.removeListener(listener);
+      reject(crawlJobUserStoppedError());
+    }, 250);
 
     function listener(updatedTabId, changeInfo) {
       if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
       clearTimeout(timer);
+      clearInterval(pollTimer);
       chrome.tabs.onUpdated.removeListener(listener);
       resolve();
     }
 
     chrome.tabs.onUpdated.addListener(listener);
     chrome.tabs.get(tabId).then((tab) => {
+      if (crawlJob.stopped) {
+        clearTimeout(timer);
+        clearInterval(pollTimer);
+        chrome.tabs.onUpdated.removeListener(listener);
+        reject(crawlJobUserStoppedError());
+        return;
+      }
       if (tab.status === "complete") {
         clearTimeout(timer);
+        clearInterval(pollTimer);
         chrome.tabs.onUpdated.removeListener(listener);
         resolve();
       }
@@ -201,13 +248,57 @@ function waitForTabComplete(tabId, timeoutMs = 60000) {
   });
 }
 
+function productToLinkEntry(product) {
+  const url = product?.url;
+  if (!url) return null;
+  const sku = String(product.product_id || product.sku || "").trim();
+  return {
+    url,
+    sku: sku || undefined,
+    title: product.title || null,
+    search_keyword: product.search_keyword || null,
+    collected_at:
+      product.date || new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+  };
+}
+
+async function syncLinkQueueFromDetails() {
+  const records = await loadDetailRecords();
+  const entries = records.map(productToLinkEntry).filter(Boolean);
+  if (!entries.length) {
+    const queue = await loadLinkQueue();
+    return {
+      ok: true,
+      count: queue.length,
+      synced: 0,
+      urls: queue,
+      filename: defaultLinksFilename(queue),
+    };
+  }
+  const result = await appendProductUrls(entries);
+  return { ...result, synced: entries.length };
+}
+
 async function appendProduct(product) {
   if (!product) throw new Error("Missing product payload");
   const records = dedupeRecords(await loadDetailRecords(), [product]);
   await saveDetailRecords(records);
+
+  let linkCount = (await loadLinkQueue()).length;
+  const linkEntry = productToLinkEntry(product);
+  if (linkEntry) {
+    try {
+      const linkResult = await appendProductUrls([linkEntry]);
+      linkCount = linkResult.count;
+    } catch (e) {
+      console.warn("appendProduct: link queue update skipped", e);
+    }
+  }
+
   return {
     ok: true,
     count: records.length,
+    linkCount,
     records,
     filename: defaultDetailFilename(records),
   };
@@ -236,10 +327,13 @@ function riskBlockedError(url) {
 }
 
 async function extractProductInNewTab(url, options = {}) {
+  assertCrawlJobNotStopped();
   const tab = await chrome.tabs.create({ url, active: options.activateTab === true });
+  crawlJob.detailTabId = tab.id;
   try {
+    if (crawlJob.stopped) throw crawlJobUserStoppedError();
     await waitForTabComplete(tab.id, options.tabTimeoutMs || 60000);
-    await sleep(options.afterLoadMs || 2500);
+    await sleepUnlessStopped(options.afterLoadMs || 2500);
 
     const tabInfo = await chrome.tabs.get(tab.id);
     if (isJdBlockedUrl(tabInfo.url) || isJdRiskUrl(tabInfo.url)) {
@@ -250,6 +344,7 @@ async function extractProductInNewTab(url, options = {}) {
       target: { tabId: tab.id },
       files: [
         "src/jd-page-url.js",
+        "src/jd-scroll-pause.js",
         "src/human-scroll.js",
         "src/extractor.js",
         "src/download.js",
@@ -257,7 +352,9 @@ async function extractProductInNewTab(url, options = {}) {
       ],
     });
 
-    const response = await chrome.tabs.sendMessage(tab.id, {
+    assertCrawlJobNotStopped();
+
+    const extractPromise = chrome.tabs.sendMessage(tab.id, {
       type: "EXTRACT_JD_PRODUCT_WITH_SCROLL",
       options: {
         scroll: true,
@@ -267,7 +364,21 @@ async function extractProductInNewTab(url, options = {}) {
       },
     });
 
+    const stopPromise = new Promise((_, reject) => {
+      const poll = setInterval(() => {
+        if (!crawlJob.stopped) return;
+        clearInterval(poll);
+        reject(crawlJobUserStoppedError());
+      }, 250);
+      extractPromise.finally(() => clearInterval(poll));
+    });
+
+    const response = await Promise.race([extractPromise, stopPromise]);
+
     if (!response?.ok) {
+      if (response?.code === "USER_STOPPED") {
+        throw crawlJobUserStoppedError();
+      }
       throw new Error(response?.error || "详情页提取失败");
     }
 
@@ -281,6 +392,7 @@ async function extractProductInNewTab(url, options = {}) {
       saved,
     };
   } finally {
+    crawlJob.detailTabId = null;
     try {
       await chrome.tabs.remove(tab.id);
     } catch (_) {
@@ -352,16 +464,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "SYNC_LINKS_FROM_DETAILS") {
+    syncLinkQueueFromDetails()
+      .then((result) => sendResponse(result))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+
   if (message?.type === "EXTRACT_URL_IN_NEW_TAB") {
     extractProductInNewTab(message.url, message.options || {})
       .then((result) => sendResponse(result))
-      .catch((error) =>
+      .catch((error) => {
+        const code = error.code || undefined;
         sendResponse({
           ok: false,
           error: String(error.message || error),
-          code: error.code || undefined,
-        })
-      );
+          code,
+        });
+      });
     return true;
   }
 

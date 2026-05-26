@@ -247,6 +247,7 @@
       maxRounds: options.scrollMaxRounds ?? 18,
       pauseMinMs: options.pauseMinMs ?? 100,
       pauseMaxMs: options.pauseMaxMs ?? 420,
+      shouldContinue: options.shouldContinue,
       ...(options.scroll || {}),
     });
     await sleep(options.afterScrollMs ?? 350);

@@ -104,8 +104,11 @@
     if (!window.JdHumanScroll?.scrollPageToBottom) {
       throw new Error("滚动模块未加载，请刷新页面后重试");
     }
-    showToast("正在平滑滚动页面（请观看当前窗口）…");
-    await window.JdHumanScroll.scrollPageToBottom(options);
+    showToast("正在平滑滚动页面（暂停任务将同步停止滚屏）…");
+    await window.JdHumanScroll.scrollPageToBottom({
+      ...options,
+      shouldContinue: options.shouldContinue,
+    });
   }
 
   async function runExtract(_button, { download = false } = {}) {
@@ -184,7 +187,11 @@
         validation_errors: _validation_errors || [],
       });
     } catch (error) {
-      sendResponse({ ok: false, error: String(error?.message || error) });
+      sendResponse({
+        ok: false,
+        error: String(error?.message || error),
+        code: error?.code || undefined,
+      });
     }
   }
 

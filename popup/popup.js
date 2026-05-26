@@ -89,6 +89,8 @@ async function injectSearchScripts(tabId) {
     target: { tabId },
     files: [
       "src/jd-page-url.js",
+      "src/jd-risk.js",
+      "src/jd-scroll-pause.js",
       "src/human-scroll.js",
       "src/human-mouse.js",
       "src/search-extractor.js",
@@ -103,6 +105,7 @@ async function injectItemScripts(tabId) {
     target: { tabId },
     files: [
       "src/jd-page-url.js",
+      "src/jd-scroll-pause.js",
       "src/human-scroll.js",
       "src/extractor.js",
       "src/download.js",
@@ -210,7 +213,7 @@ function updateUiForTab(tab) {
         "商品页会先平滑滚屏再提取；「只提取」仅写入详情缓存，不触发下载";
     } else if (isList) {
       hintEl.textContent =
-        "推荐：先「翻页缓存链接」→「批量详情提取」；或直接「逐一点开详情提取」";
+        "「翻页缓存链接」只收集链接；「逐一点开详情提取」会同时写入详情与链接队列";
     } else {
       hintEl.textContent = "下方可管理已缓存的详情/链接数据";
     }
@@ -309,12 +312,23 @@ async function runItemExtract({ download }) {
 }
 
 async function refreshCacheStatus() {
-  const [details, links] = await Promise.all([
+  let [details, links] = await Promise.all([
     chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" }),
     chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" }),
   ]);
-  const detailCount = details?.ok ? details.count : 0;
-  const linkCount = links?.ok ? links.count : 0;
+  let detailCount = details?.ok ? details.count : 0;
+  let linkCount = links?.ok ? links.count : 0;
+
+  if (detailCount > 0 && linkCount === 0) {
+    const synced = await chrome.runtime.sendMessage({
+      type: "SYNC_LINKS_FROM_DETAILS",
+    });
+    if (synced?.ok) {
+      linkCount = synced.count;
+      links = synced;
+    }
+  }
+
   if (cacheStatusEl) {
     cacheStatusEl.textContent = `当前缓存：详情 ${detailCount} 条，链接队列 ${linkCount} 条`;
   }
@@ -536,10 +550,10 @@ if (pauseJobBtn) {
     if (!state.active) return;
     if (state.paused) {
       await chrome.runtime.sendMessage({ type: "CRAWL_JOB_RESUME" });
-      setStatus("已继续任务", "ok");
+      setStatus("已继续：滚屏与抓取将恢复", "ok");
     } else {
       await chrome.runtime.sendMessage({ type: "CRAWL_JOB_PAUSE" });
-      setStatus("已暂停，点击「继续」恢复", "ok");
+      setStatus("已暂停：滚屏与抓取均已暂停", "ok");
     }
     await syncJobControlsFromBackground();
   });
@@ -548,9 +562,24 @@ if (pauseJobBtn) {
 if (stopJobBtn) {
   stopJobBtn.addEventListener("click", async () => {
     const state = await getCrawlJobState();
-    if (!state.active) return;
+    if (!state.active) {
+      setStatus("当前没有运行中的任务", "warn");
+      return;
+    }
     await chrome.runtime.sendMessage({ type: "CRAWL_JOB_STOP" });
     setStatus("正在结束任务…", "ok");
+    const deadline = Date.now() + 90000;
+    while (Date.now() < deadline) {
+      const s = await getCrawlJobState();
+      if (!s.active) {
+        setStatus("任务已结束", "ok");
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    if ((await getCrawlJobState()).active) {
+      setStatus("结束超时：请刷新搜索页后重试", "error");
+    }
     await syncJobControlsFromBackground();
   });
 }

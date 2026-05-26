@@ -19,6 +19,15 @@
 
   if (window.JdPageUrl?.detectPageMode(location.href) !== "list") return;
 
+  if (!window.__jdScrollShouldContinue) {
+    window.__jdScrollShouldContinue = async () => {
+      const state = await getCrawlJobState();
+      if (state.stopped || !state.active) throw userStoppedError();
+      if (state.paused) return false;
+      return true;
+    };
+  }
+
   function injectFloatingButton() {
     if (document.getElementById("jd-search-extractor-panel")) return;
     window[FLAG] = true;
@@ -212,20 +221,44 @@
     if (!state.active) return;
     if (state.paused) {
       await chrome.runtime.sendMessage({ type: "CRAWL_JOB_RESUME" });
-      showToast("已继续任务");
+      showToast("已继续：滚屏与抓取将恢复");
     } else {
       await chrome.runtime.sendMessage({ type: "CRAWL_JOB_PAUSE" });
-      showToast("已暂停，点击「继续」恢复");
+      showToast("已暂停：滚屏与抓取均已暂停，点「继续」恢复");
     }
     await syncJobControlsFromBackground();
   }
 
+  async function waitForCrawlJobInactive(timeoutMs = 90000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const state = await getCrawlJobState();
+      if (!state.active) return true;
+      if (state.stopped) {
+        await sleep(200);
+        continue;
+      }
+      await sleep(300);
+    }
+    return false;
+  }
+
   async function stopCrawlJob() {
     const state = await getCrawlJobState();
-    if (!state.active) return;
+    if (!state.active) {
+      showToast("当前没有运行中的任务");
+      return;
+    }
     await chrome.runtime.sendMessage({ type: "CRAWL_JOB_STOP" });
     showToast("正在结束任务…");
+    const ended = await waitForCrawlJobInactive();
+    if (ended) {
+      showToast("任务已结束");
+    } else {
+      showToast("结束超时：请刷新搜索页后重试", true);
+    }
     await syncJobControlsFromBackground();
+    await refreshResumeButton();
   }
 
   function userStoppedError() {
@@ -236,15 +269,18 @@
 
   async function crawlJobCheckpoint() {
     let state = await getCrawlJobState();
-    if (state.stopped) throw userStoppedError();
+    if (state.stopped || !state.active) throw userStoppedError();
 
     while (state.paused && !state.stopped) {
       const pauseBtn = document.getElementById("jd-search-pause-job-btn");
       if (pauseBtn) pauseBtn.textContent = "继续";
       await sleep(400);
       state = await getCrawlJobState();
-      if (state.stopped) throw userStoppedError();
+      if (state.stopped || !state.active) throw userStoppedError();
     }
+
+    state = await getCrawlJobState();
+    if (state.stopped || !state.active) throw userStoppedError();
 
     const pauseBtn = document.getElementById("jd-search-pause-job-btn");
     if (pauseBtn) pauseBtn.textContent = "暂停";
@@ -453,6 +489,31 @@
     showToast(`任务类型 ${cp.kind} 暂不支持续跑`, true);
   }
 
+  async function cacheSearchCardUrls(cards) {
+    if (!cards?.length) return;
+    const keyword = JdSearchExtractor.searchKeywordFromUrl?.() || null;
+    const entries = [];
+    for (const card of cards) {
+      const sku = card.getAttribute("data-sku");
+      if (!sku) continue;
+      const link = JdSearchExtractor.findProductLinkInCard(card);
+      entries.push({
+        url: JdSearchExtractor.itemUrlFromSku(sku),
+        sku,
+        title: link?.getAttribute("title") || link?.textContent?.trim()?.slice(0, 80) || null,
+        search_keyword: keyword,
+      });
+    }
+    if (!entries.length) return;
+    const saved = await chrome.runtime.sendMessage({
+      type: "APPEND_PRODUCT_URLS",
+      urls: entries,
+    });
+    if (!saved?.ok) {
+      console.warn("cacheSearchCardUrls:", saved?.error);
+    }
+  }
+
   async function getMaxPages() {
     try {
       const stored = await chrome.storage.local.get("jd_search_max_pages");
@@ -609,6 +670,8 @@
             throw new Error("当前页未找到商品卡片");
           }
 
+          await cacheSearchCardUrls(cards);
+
           const begin = pageNum === startPage ? startCard : 0;
           for (let i = begin; i < cards.length; i++) {
             await crawlJobCheckpoint();
@@ -694,6 +757,8 @@
                 pageNum,
                 cardIndex: i,
               });
+            } else if (isUserStopped(result) || result?.code === "USER_STOPPED") {
+              throw userStoppedError();
             } else {
               stats.detailFail += 1;
               console.warn("Detail extract failed:", url, result?.error);
@@ -849,6 +914,8 @@
               queueIndex: i,
               stats: { ok, fail },
             });
+          } else if (isUserStopped(result) || result?.code === "USER_STOPPED") {
+            throw userStoppedError();
           } else {
             fail += 1;
             console.warn("Detail extract failed:", entry.url, result?.error);

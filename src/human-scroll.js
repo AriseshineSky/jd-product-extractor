@@ -211,13 +211,21 @@
   /**
    * 对所有可滚动容器分段滚到底（可见窗口会跟着动）。
    */
+  async function scrollGate(options) {
+    const api = global.JdScrollPause;
+    if (api?.gateScroll) await api.gateScroll(options);
+  }
+
   async function scrollPageToBottom(options = {}) {
     const maxRounds = Number(options.maxRounds) || 28;
     const pauseMin = Number(options.pauseMinMs) || 120;
     const pauseMax = Number(options.pauseMaxMs) || 480;
     let stableRounds = 0;
 
+    await scrollGate(options);
+
     for (let round = 0; round < maxRounds; round++) {
+      await scrollGate(options);
       const targets = discoverScrollTargets();
       const viewport = viewportHeight();
       let anyMoved = false;
@@ -233,6 +241,7 @@
         const chunkRatio = rand(0.42, 0.78);
         const segmentDelta = Math.min(remaining, viewport * chunkRatio);
 
+        await scrollGate(options);
         await scrollTargetSegment(target, segmentDelta, {
           easing: pickEasing(round, maxRounds),
           durationMs: rand(600, 1300) + segmentDelta * 0.25,
@@ -246,15 +255,19 @@
         continue;
       }
 
+      await scrollGate(options);
       await sleep(rand(pauseMin, pauseMax));
     }
 
+    await scrollGate(options);
     const targets = discoverScrollTargets();
     for (const target of targets) {
       if (target.maxY() > 0) {
+        await scrollGate(options);
         await maybeOvershootTarget(target, target.maxY(), options);
       }
     }
+    await scrollGate(options);
     await sleep(rand(250, 500));
 
     const detail =
@@ -263,11 +276,13 @@
       document.querySelector(".detail-content");
 
     if (detail) {
+      await scrollGate(options);
       scrollElementIntoView(detail);
       await sleep(rand(300, 500));
 
       const targets2 = discoverScrollTargets();
       for (const target of targets2) {
+        await scrollGate(options);
         const rect = detail.getBoundingClientRect();
         if (target.kind === "window") {
           const detailTop = Math.max(0, window.scrollY + rect.top - rand(60, 100));
@@ -289,10 +304,12 @@
     }
 
     for (const target of discoverScrollTargets()) {
+      await scrollGate(options);
       if (target.maxY() > target.getY() + 5) {
         await animateTargetY(target, target.getY(), target.maxY(), rand(600, 900), EASINGS.land);
       }
     }
+    await scrollGate(options);
   }
 
   const api = {
