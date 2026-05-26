@@ -6,7 +6,7 @@
   function defaultFilename(records) {
     const stamp = new Date().toISOString().slice(0, 10);
     const sku = records.at(-1)?.product_id || records.at(-1)?.sku || "product";
-    return `jd-products-${stamp}-${sku}.jsonl`;
+    return `jd-details-${stamp}-${sku}.jsonl`;
   }
 
   function downloadRecords(records, filename) {

@@ -3,20 +3,13 @@
   const STYLE_ID = "jd-search-extractor-style";
 
   const BTN_IDS = [
-    "jd-search-extractor-btn",
-    "jd-search-extractor-multi-btn",
     "jd-search-cache-urls-btn",
-    "jd-search-cache-urls-multi-btn",
     "jd-search-batch-detail-btn",
     "jd-search-deep-crawl-btn",
     "jd-search-deep-crawl-multi-btn",
   ];
 
-  function isSearchPage() {
-    return /^(search|list)\.jd\.com$/i.test(location.hostname);
-  }
-
-  if (!isSearchPage()) return;
+  if (window.JdPageUrl?.detectPageMode(location.href) !== "list") return;
 
   function injectFloatingButton() {
     if (document.getElementById("jd-search-extractor-panel")) return;
@@ -51,17 +44,14 @@
           opacity: 0.65;
           cursor: wait;
         }
-        #jd-search-extractor-btn { background: #e1251b; }
-        #jd-search-extractor-multi-btn { background: #c41e16; }
         #jd-search-cache-urls-btn { background: #2563eb; }
-        #jd-search-cache-urls-multi-btn { background: #1d4ed8; }
         #jd-search-batch-detail-btn { background: #7c3aed; }
         #jd-search-deep-crawl-btn { background: #059669; }
         #jd-search-deep-crawl-multi-btn { background: #047857; }
         #jd-search-extractor-toast {
           position: fixed;
           right: 18px;
-          bottom: 400px;
+          bottom: 280px;
           z-index: 2147483647;
           max-width: 380px;
           padding: 10px 12px;
@@ -81,38 +71,23 @@
 
     const defs = [
       {
-        id: "jd-search-extractor-btn",
-        text: "① 提取本页 JSONL",
-        onClick: () => runExtractSearch({ multiPage: false }),
-      },
-      {
-        id: "jd-search-extractor-multi-btn",
-        text: "② 翻页提取 JSONL",
-        onClick: () => runExtractSearch({ multiPage: true }),
-      },
-      {
         id: "jd-search-cache-urls-btn",
-        text: "③ 本页缓存商品链接",
-        onClick: () => runCacheUrls({ multiPage: false }),
-      },
-      {
-        id: "jd-search-cache-urls-multi-btn",
-        text: "④ 翻页缓存商品链接",
-        onClick: () => runCacheUrls({ multiPage: true }),
+        text: "翻页缓存链接",
+        onClick: () => runCacheUrls(),
       },
       {
         id: "jd-search-batch-detail-btn",
-        text: "⑤ 批量打开详情并提取",
+        text: "批量详情提取",
         onClick: () => runBatchDetailExtract(),
       },
       {
         id: "jd-search-deep-crawl-btn",
-        text: "⑥ 本页逐一点开详情提取",
+        text: "本页逐一点开详情提取",
         onClick: () => runDeepCrawlSearch({ multiPage: false }),
       },
       {
         id: "jd-search-deep-crawl-multi-btn",
-        text: "⑦ 翻页逐一点开详情提取",
+        text: "翻页逐一点开详情提取",
         onClick: () => runDeepCrawlSearch({ multiPage: true, downloadAtEnd: true }),
       },
     ];
@@ -172,53 +147,20 @@
     }, 8000);
   }
 
-  async function runExtractSearch({ multiPage = false } = {}) {
+  async function runCacheUrls() {
     setAllButtonsDisabled(true);
-    const maxPages = multiPage ? await getMaxPages() : 1;
+    const maxPages = await getMaxPages();
     showToast(
-      multiPage ? `正在平滑滚屏并翻页提取（最多 ${maxPages} 页）…` : "正在平滑滚屏并提取本页…"
-    );
-
-    try {
-      const result = multiPage
-        ? await JdSearchExtractor.extractJdSearchProductsMultiPage({ maxPages })
-        : await JdSearchExtractor.extractJdSearchProducts();
-      const products = result.products.map(({ _validation_errors, ...row }) => row);
-
-      const saved = await chrome.runtime.sendMessage({
-        type: "APPEND_JSONL_RECORDS",
-        products,
-      });
-
-      if (!saved?.ok) throw new Error(saved?.error || "保存失败");
-
-      JdJsonlDownload.downloadRecords(
-        saved.records,
-        saved.filename || `jd-search-${new Date().toISOString().slice(0, 10)}.jsonl`
-      );
-
-      const pageInfo = multiPage ? `，共 ${result.pages} 页` : "";
-      showToast(`已提取 ${result.count} 条${pageInfo}并下载 JSONL（缓存 ${saved.count} 条）`);
-    } catch (error) {
-      showToast(String(error.message || error), true);
-    } finally {
-      setAllButtonsDisabled(false);
-    }
-  }
-
-  async function runCacheUrls({ multiPage = false } = {}) {
-    setAllButtonsDisabled(true);
-    const maxPages = multiPage ? await getMaxPages() : 1;
-    showToast(
-      multiPage
+      maxPages > 1
         ? `正在平滑滚屏并翻页缓存链接（最多 ${maxPages} 页）…`
         : "正在平滑滚屏并缓存本页链接…"
     );
 
     try {
-      const result = multiPage
-        ? await JdSearchExtractor.collectSearchUrlsMultiPage({ maxPages })
-        : await JdSearchExtractor.collectUrlsFromSearchPage();
+      const result =
+        maxPages > 1
+          ? await JdSearchExtractor.collectSearchUrlsMultiPage({ maxPages })
+          : await JdSearchExtractor.collectUrlsFromSearchPage();
 
       const saved = await chrome.runtime.sendMessage({
         type: "APPEND_PRODUCT_URLS",
@@ -227,9 +169,9 @@
 
       if (!saved?.ok) throw new Error(saved?.error || "链接缓存失败");
 
-      const pageInfo = multiPage ? `（${result.pages} 页）` : "";
+      const pageInfo = maxPages > 1 ? `（${result.pages} 页）` : "";
       showToast(
-        `已缓存 ${result.count} 个商品链接${pageInfo}，队列共 ${saved.count} 条。可点「⑤ 批量打开详情并提取」`
+        `已缓存 ${result.count} 个链接${pageInfo}，链接缓存共 ${saved.count} 条。可点「批量详情提取」`
       );
     } catch (error) {
       showToast(String(error.message || error), true);
@@ -248,7 +190,7 @@
   }
 
   /**
-   * 当前搜索页：先提取列表 → 逐个模拟点击商品 → 新标签详情滚屏提取 → 可选翻页。
+   * 当前搜索页：逐卡打开详情滚屏提取 → 可选翻页（仅写入详情缓存，不写列表摘要）。
    */
   async function runDeepCrawlSearch({ multiPage = false, downloadAtEnd = false } = {}) {
     setAllButtonsDisabled(true);
@@ -258,25 +200,15 @@
 
     showToast(
       multiPage
-        ? `深度抓取：最多 ${maxPages} 页，每页先列表后逐一点开详情…`
-        : "深度抓取本页：先列表摘要，再逐一点开详情…"
+        ? `深度抓取：最多 ${maxPages} 页，逐一点开详情提取…`
+        : "本页逐一点开详情提取…"
     );
 
-    const stats = { listCount: 0, detailOk: 0, detailFail: 0, pages: 0 };
+    const stats = { detailOk: 0, detailFail: 0, pages: 0 };
 
     try {
       for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
         await JdSearchExtractor.humanScrollPage();
-
-        showToast(`第 ${pageNum} 页：提取当前页列表信息…`);
-        const listResult = await JdSearchExtractor.extractJdSearchProducts({ scroll: false });
-        const listRows = listResult.products.map(({ _validation_errors, ...row }) => row);
-        const listSaved = await chrome.runtime.sendMessage({
-          type: "APPEND_JSONL_RECORDS",
-          products: listRows,
-        });
-        if (!listSaved?.ok) throw new Error(listSaved?.error || "列表缓存失败");
-        stats.listCount += listResult.count;
         stats.pages = pageNum;
 
         const cards = JdSearchExtractor.findSearchCards();
@@ -294,7 +226,7 @@
             link?.textContent?.trim()?.slice(0, 40) ||
             sku;
 
-          showToast(`第${pageNum}页 ${i + 1}/${cards.length}：模拟点击「${label}」并提取详情…`);
+          showToast(`第${pageNum}页 ${i + 1}/${cards.length}：提取详情「${label}」…`);
 
           if (link && window.JdHumanMouse?.humanClickOpenInNewTab) {
             try {
@@ -355,15 +287,15 @@
         if (records?.ok && records.count) {
           JdJsonlDownload.downloadRecords(
             records.records,
-            `jd-deep-crawl-${new Date().toISOString().slice(0, 10)}.jsonl`
+            records.filename || `jd-details-${new Date().toISOString().slice(0, 10)}.jsonl`
           );
         }
       }
 
       const cache = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
       showToast(
-        `深度抓取完成：${stats.pages} 页，列表 ${stats.listCount} 条，详情成功 ${stats.detailOk}、失败 ${stats.detailFail}，缓存共 ${cache?.count ?? "?"} 条` +
-          (downloadAtEnd ? "，已下载 JSONL" : "")
+        `深度抓取完成：${stats.pages} 页，详情成功 ${stats.detailOk}、失败 ${stats.detailFail}，详情缓存 ${cache?.count ?? "?"} 条` +
+          (downloadAtEnd ? "，已下载详情 JSONL" : "")
       );
     } catch (error) {
       showToast(String(error.message || error), true);
@@ -381,9 +313,9 @@
 
     try {
       const queue = await chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" });
-      if (!queue?.ok) throw new Error(queue?.error || "读取链接队列失败");
+      if (!queue?.ok) throw new Error(queue?.error || "读取链接缓存失败");
       if (!queue.count) {
-        throw new Error("链接队列为空，请先点「③ 本页缓存」或「④ 翻页缓存商品链接」");
+        throw new Error("链接缓存为空，请先点「翻页缓存链接」");
       }
 
       const delayMs = await getDetailTabDelay();
@@ -394,7 +326,7 @@
         const entry = queue.urls[i];
         const label = entry.title || entry.sku || entry.url;
         showToast(
-          `详情 ${i + 1}/${queue.count}：平滑滚屏并提取 ${String(label).slice(0, 28)}…`
+          `详情 ${i + 1}/${queue.count}：提取 ${String(label).slice(0, 28)}…`
         );
 
         const result = await chrome.runtime.sendMessage({
@@ -420,18 +352,18 @@
       }
 
       const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
-      const cacheCount = records?.count ?? ok;
+      const detailCount = records?.count ?? ok;
 
       if (ok > 0 && records?.ok) {
         JdJsonlDownload.downloadRecords(
           records.records,
-          `jd-details-${new Date().toISOString().slice(0, 10)}.jsonl`
+          records.filename || `jd-details-${new Date().toISOString().slice(0, 10)}.jsonl`
         );
       }
 
       showToast(
-        `批量详情提取完成：成功 ${ok}，失败 ${fail}，JSONL 缓存共 ${cacheCount} 条` +
-          (ok > 0 ? "，已触发下载" : "")
+        `批量详情提取完成：成功 ${ok}，失败 ${fail}，详情缓存 ${detailCount} 条` +
+          (ok > 0 ? "，已下载详情 JSONL" : "")
       );
     } catch (error) {
       showToast(String(error.message || error), true);
@@ -443,25 +375,6 @@
   if (!window.__jdSearchExtractorMessageListener) {
     window.__jdSearchExtractorMessageListener = true;
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type === "EXTRACT_JD_SEARCH") {
-        (async () => {
-          try {
-            if (!window.JdSearchExtractor?.extractJdSearchProducts) {
-              throw new Error("搜索页提取脚本未加载，请刷新页面后重试");
-            }
-            const opts = message.options || {};
-            const data =
-              opts.maxPages && opts.maxPages > 1
-                ? await window.JdSearchExtractor.extractJdSearchProductsMultiPage(opts)
-                : await window.JdSearchExtractor.extractJdSearchProducts(opts);
-            sendResponse({ ok: true, data });
-          } catch (error) {
-            sendResponse({ ok: false, error: String(error?.message || error) });
-          }
-        })();
-        return true;
-      }
-
       if (message?.type === "CACHE_JD_SEARCH_URLS") {
         (async () => {
           try {

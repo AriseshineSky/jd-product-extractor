@@ -27,6 +27,7 @@
     {
       "matches": ["https://search.jd.com/*", "https://list.jd.com/*"],
       "js": [
+        "src/jd-page-url.js",
         "src/human-scroll.js",
         "src/human-mouse.js",
         "src/search-extractor.js",
@@ -42,7 +43,13 @@
         "https://item.yiyaojd.com/*.html*",
         "https://item.jingxi.com/*.html*"
       ],
-      "js": ["src/human-scroll.js", "src/extractor.js", "src/download.js", "src/content.js"],
+      "js": [
+        "src/jd-page-url.js",
+        "src/human-scroll.js",
+        "src/extractor.js",
+        "src/download.js",
+        "src/content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

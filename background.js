@@ -1,28 +1,37 @@
-const STORAGE_KEY = "jd_jsonl_records";
-const URL_QUEUE_KEY = "jd_product_url_queue";
+/** 商品详情 ProductSource 记录（仅详情页 / 批量详情提取写入） */
+const DETAIL_STORAGE_KEY = "jd_jsonl_records";
+/** 搜索页收集的商品链接队列（导出为 jd-links-*.jsonl） */
+const LINK_STORAGE_KEY = "jd_product_url_queue";
 
-async function loadRecords() {
-  const stored = await chrome.storage.local.get(STORAGE_KEY);
-  return Array.isArray(stored[STORAGE_KEY]) ? stored[STORAGE_KEY] : [];
+async function loadDetailRecords() {
+  const stored = await chrome.storage.local.get(DETAIL_STORAGE_KEY);
+  return Array.isArray(stored[DETAIL_STORAGE_KEY]) ? stored[DETAIL_STORAGE_KEY] : [];
 }
 
-async function saveRecords(records) {
-  await chrome.storage.local.set({ [STORAGE_KEY]: records });
+async function saveDetailRecords(records) {
+  await chrome.storage.local.set({ [DETAIL_STORAGE_KEY]: records });
 }
 
-async function loadUrlQueue() {
-  const stored = await chrome.storage.local.get(URL_QUEUE_KEY);
-  return Array.isArray(stored[URL_QUEUE_KEY]) ? stored[URL_QUEUE_KEY] : [];
+async function loadLinkQueue() {
+  const stored = await chrome.storage.local.get(LINK_STORAGE_KEY);
+  return Array.isArray(stored[LINK_STORAGE_KEY]) ? stored[LINK_STORAGE_KEY] : [];
 }
 
-async function saveUrlQueue(urls) {
-  await chrome.storage.local.set({ [URL_QUEUE_KEY]: urls });
+async function saveLinkQueue(urls) {
+  await chrome.storage.local.set({ [LINK_STORAGE_KEY]: urls });
 }
 
-function defaultFilename(records) {
+function defaultDetailFilename(records) {
   const stamp = new Date().toISOString().slice(0, 10);
   const sku = records.at(-1)?.product_id || records.at(-1)?.sku || "product";
-  return `jd-products-${stamp}-${sku}.jsonl`;
+  return `jd-details-${stamp}-${sku}.jsonl`;
+}
+
+function defaultLinksFilename(links) {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const keyword = links[0]?.search_keyword || "links";
+  const safeKeyword = String(keyword).replace(/[^\w\u4e00-\u9fa5-]+/g, "_").slice(0, 40);
+  return `jd-links-${stamp}-${safeKeyword}.jsonl`;
 }
 
 function dedupeRecords(records, incoming) {
@@ -83,39 +92,28 @@ function waitForTabComplete(tabId, timeoutMs = 60000) {
 
 async function appendProduct(product) {
   if (!product) throw new Error("Missing product payload");
-  const records = dedupeRecords(await loadRecords(), [product]);
-  await saveRecords(records);
+  const records = dedupeRecords(await loadDetailRecords(), [product]);
+  await saveDetailRecords(records);
   return {
     ok: true,
     count: records.length,
     records,
-    filename: defaultFilename(records),
-  };
-}
-
-async function appendProducts(products) {
-  const list = Array.isArray(products) ? products.filter(Boolean) : [];
-  if (!list.length) throw new Error("Missing product payloads");
-  const records = dedupeRecords(await loadRecords(), list);
-  await saveRecords(records);
-  const stamp = new Date().toISOString().slice(0, 10);
-  const keyword = list[0]?.search_keyword || list[0]?.categories || "search";
-  const safeKeyword = String(keyword).replace(/[^\w\u4e00-\u9fa5-]+/g, "_").slice(0, 40);
-  return {
-    ok: true,
-    count: records.length,
-    added: list.length,
-    records,
-    filename: `jd-search-${stamp}-${safeKeyword}.jsonl`,
+    filename: defaultDetailFilename(records),
   };
 }
 
 async function appendProductUrls(entries) {
   const list = Array.isArray(entries) ? entries.filter((e) => e?.url) : [];
   if (!list.length) throw new Error("Missing URL entries");
-  const queue = dedupeUrlEntries(await loadUrlQueue(), list);
-  await saveUrlQueue(queue);
-  return { ok: true, count: queue.length, added: list.length, urls: queue };
+  const queue = dedupeUrlEntries(await loadLinkQueue(), list);
+  await saveLinkQueue(queue);
+  return {
+    ok: true,
+    count: queue.length,
+    added: list.length,
+    urls: queue,
+    filename: defaultLinksFilename(queue),
+  };
 }
 
 async function extractProductInNewTab(url, options = {}) {
@@ -126,7 +124,13 @@ async function extractProductInNewTab(url, options = {}) {
 
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      files: ["src/human-scroll.js", "src/extractor.js", "src/download.js", "src/content.js"],
+      files: [
+        "src/jd-page-url.js",
+        "src/human-scroll.js",
+        "src/extractor.js",
+        "src/download.js",
+        "src/content.js",
+      ],
     });
 
     const response = await chrome.tabs.sendMessage(tab.id, {
@@ -180,13 +184,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "APPEND_JSONL_RECORDS") {
-    appendProducts(message.products)
-      .then((result) => sendResponse(result))
-      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
-    return true;
-  }
-
   if (message?.type === "APPEND_PRODUCT_URLS") {
     appendProductUrls(message.urls)
       .then((result) => sendResponse(result))
@@ -195,14 +192,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "GET_PRODUCT_URLS") {
-    loadUrlQueue()
-      .then((urls) => sendResponse({ ok: true, urls, count: urls.length }))
+    loadLinkQueue()
+      .then((urls) =>
+        sendResponse({
+          ok: true,
+          urls,
+          count: urls.length,
+          filename: defaultLinksFilename(urls),
+        })
+      )
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }
 
   if (message?.type === "CLEAR_PRODUCT_URLS") {
-    saveUrlQueue([])
+    saveLinkQueue([])
       .then(() => sendResponse({ ok: true }))
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
@@ -215,30 +219,24 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
-  if (message?.type === "DOWNLOAD_JSONL") {
-    loadRecords()
-      .then((records) =>
-        sendResponse({
+  if (message?.type === "DOWNLOAD_JSONL" || message?.type === "GET_JSONL_RECORDS") {
+    loadDetailRecords()
+      .then((records) => {
+        const payload = {
           ok: true,
           records,
           count: records.length,
-          filename: defaultFilename(records),
-        })
-      )
+          filename: defaultDetailFilename(records),
+        };
+        sendResponse(payload);
+      })
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }
 
   if (message?.type === "CLEAR_JSONL_RECORDS") {
-    saveRecords([])
+    saveDetailRecords([])
       .then(() => sendResponse({ ok: true }))
-      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
-    return true;
-  }
-
-  if (message?.type === "GET_JSONL_RECORDS") {
-    loadRecords()
-      .then((records) => sendResponse({ ok: true, records, count: records.length }))
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }

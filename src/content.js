@@ -3,6 +3,8 @@
   const STYLE_ID = "jd-product-extractor-style";
   const PANEL_ID = "jd-product-extractor-panel";
 
+  if (window.JdPageUrl?.detectPageMode(location.href) !== "item") return;
+
   function injectFloatingButton() {
     if (document.getElementById(PANEL_ID)) return;
     window[FLAG] = true;

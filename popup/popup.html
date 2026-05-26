@@ -9,15 +9,19 @@
   <body>
     <header>
       <h1>JD 商品提取</h1>
-      <p class="hint">在 item.jd.com 商品页点击提取，输出 ProductSource JSONL</p>
+      <p id="page-mode" class="page-mode" hidden></p>
+      <p class="hint">在 item.jd.com 商品页点击提取，输出详情 JSONL</p>
     </header>
+    <p id="unsupported-notice" class="unsupported-notice" hidden>
+      请切换到<strong>商品详情页</strong>（item.jd.com）或<strong>搜索/分类列表页</strong>（search.jd.com、list.jd.com）后再操作。
+    </p>
     <div id="search-options" class="search-options" hidden>
       <label for="search-pages">自动翻页页数（1=仅当前页）</label>
       <input id="search-pages" type="number" min="1" max="50" value="5" />
       <label for="detail-delay">详情页间隔（毫秒）</label>
       <input id="detail-delay" type="number" min="500" max="15000" value="2500" />
     </div>
-    <div class="actions item-actions">
+    <div class="actions item-actions" hidden>
       <button id="extract-only-btn" type="button" class="blue">只提取商品信息</button>
       <button id="extract-btn" type="button">提取并下载 JSONL</button>
       <button id="copy-btn" type="button" disabled>复制 JSON</button>
@@ -27,13 +31,17 @@
       <button id="batch-detail-btn" type="button" class="purple">批量详情提取</button>
       <button id="deep-crawl-btn" type="button" class="green">逐一点开详情提取</button>
     </div>
-    <div class="actions secondary">
-      <button id="download-all-btn" type="button">下载已缓存 JSONL</button>
-      <button id="clear-urls-btn" type="button" class="ghost" hidden>清空链接队列</button>
-      <button id="clear-btn" type="button" class="ghost">清空 JSONL 缓存</button>
+    <div class="actions secondary cache-actions">
+      <button id="download-detail-btn" type="button">下载详情 JSONL</button>
+      <button id="download-links-btn" type="button">下载链接 JSONL</button>
+    </div>
+    <div class="actions secondary cache-actions">
+      <button id="clear-detail-btn" type="button" class="ghost">清空详情缓存</button>
+      <button id="clear-links-btn" type="button" class="ghost" hidden>清空链接缓存</button>
     </div>
     <p id="status" class="status"></p>
     <pre id="output" class="output" aria-live="polite"></pre>
+    <script src="../src/jd-page-url.js"></script>
     <script src="../src/download.js"></script>
     <script src="popup.js"></script>
   </body>
