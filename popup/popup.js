@@ -198,7 +198,7 @@ function updateUiForTab(tab) {
   if (itemActionsEl) itemActionsEl.hidden = !isItem;
   if (searchOptionsEl) searchOptionsEl.hidden = !isList;
   if (searchActionsEl) searchActionsEl.hidden = !isList;
-  if (clearLinksBtn) clearLinksBtn.hidden = !isList;
+  if (clearLinksBtn) clearLinksBtn.hidden = false;
   if (unsupportedNoticeEl) unsupportedNoticeEl.hidden = mode !== "unsupported";
 
   if (pageModeEl) {
@@ -312,25 +312,16 @@ async function runItemExtract({ download }) {
 }
 
 async function refreshCacheStatus() {
-  let [details, links] = await Promise.all([
+  const [details, links] = await Promise.all([
     chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" }),
     chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" }),
   ]);
-  let detailCount = details?.ok ? details.count : 0;
-  let linkCount = links?.ok ? links.count : 0;
-
-  if (detailCount > 0 && linkCount === 0) {
-    const synced = await chrome.runtime.sendMessage({
-      type: "SYNC_LINKS_FROM_DETAILS",
-    });
-    if (synced?.ok) {
-      linkCount = synced.count;
-      links = synced;
-    }
-  }
+  const detailCount = details?.ok ? details.count : 0;
+  const linkCount = links?.ok ? links.count : 0;
 
   if (cacheStatusEl) {
-    cacheStatusEl.textContent = `当前缓存：详情 ${detailCount} 条，链接队列 ${linkCount} 条`;
+    cacheStatusEl.textContent =
+      `当前缓存：详情 ${detailCount} 条，链接 ${linkCount} 条（链接仅来自搜索页「翻页缓存链接」）`;
   }
 }
 

@@ -284,21 +284,9 @@ async function appendProduct(product) {
   const records = dedupeRecords(await loadDetailRecords(), [product]);
   await saveDetailRecords(records);
 
-  let linkCount = (await loadLinkQueue()).length;
-  const linkEntry = productToLinkEntry(product);
-  if (linkEntry) {
-    try {
-      const linkResult = await appendProductUrls([linkEntry]);
-      linkCount = linkResult.count;
-    } catch (e) {
-      console.warn("appendProduct: link queue update skipped", e);
-    }
-  }
-
   return {
     ok: true,
     count: records.length,
-    linkCount,
     records,
     filename: defaultDetailFilename(records),
   };

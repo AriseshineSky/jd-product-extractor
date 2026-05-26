@@ -23,11 +23,15 @@
     }
   }
 
-  /** 无任务 / 未暂停 → true；暂停 → 阻塞直到继续；结束 → 抛错 */
+  /**
+   * 仅在有批量/深度抓取任务 (active) 时拦截滚屏。
+   * 商品页单独提取无任务 → 直接放行，不抛「任务已结束」。
+   */
   async function waitForCrawlScrollContinue() {
     while (true) {
       const state = await queryCrawlJobState();
-      if (state.stopped || !state.active) throw userStoppedError();
+      if (!state.active) return true;
+      if (state.stopped) throw userStoppedError();
       if (!state.paused) return true;
       await sleep(400);
     }
@@ -36,7 +40,8 @@
   async function createScrollShouldContinue() {
     return async function scrollShouldContinue() {
       const state = await queryCrawlJobState();
-      if (state.stopped || !state.active) throw userStoppedError();
+      if (!state.active) return true;
+      if (state.stopped) throw userStoppedError();
       if (state.paused) return false;
       return true;
     };
