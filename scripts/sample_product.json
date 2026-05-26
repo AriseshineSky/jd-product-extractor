@@ -1,0 +1,48 @@
+{
+  "date": "2026-05-18T13:30:00Z",
+  "url": "https://item.jd.com/100012043978.html",
+  "source": "jd",
+  "sku": "100012043978",
+  "price": 1499.0,
+  "currency": "CNY",
+  "available_qty": null,
+  "images": "https://img13.360buyimg.com/n1/jfs/t1/411002/40/7826/118558/69ca62fdFb118a799/00833203202dab78.png",
+  "product_id": "100012043978",
+  "existence": true,
+  "title": "茅台飞天 53%vol 500ml 贵州茅台酒（带杯）",
+  "description": "<p>茅台飞天 53%vol 500ml 贵州茅台酒（带杯）</p>",
+  "summary": "请完成预约后及时抢购",
+  "upc": null,
+  "brand": "贵州茅台",
+  "specifications": null,
+  "categories": "酒类>白酒>茅台（MOUTAI）>贵州茅台",
+  "videos": null,
+  "options": [{"name": "规格"}, {"name": "其他信息"}],
+  "variants": [
+    {
+      "sku": "100012043978",
+      "price": 1499.0,
+      "currency": "CNY",
+      "available_qty": null,
+      "barcode": null,
+      "variant_id": "100012043978",
+      "option_values": [
+        {"option_name": "规格", "option_value": "1539(需预约)"},
+        {"option_name": "其他信息", "option_value": "*"}
+      ],
+      "images": "https://img13.360buyimg.com/n1/jfs/t1/411002/40/7826/118558/69ca62fdFb118a799/00833203202dab78.png"
+    }
+  ],
+  "returnable": false,
+  "reviews": null,
+  "rating": null,
+  "sold_count": null,
+  "shipping_fee": 0,
+  "shipping_days_min": 1,
+  "shipping_days_max": 3,
+  "weight": null,
+  "width": null,
+  "height": null,
+  "length": null,
+  "has_only_default_variant": false
+}

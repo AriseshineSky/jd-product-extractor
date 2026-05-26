@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "JD Product Extractor",
+  "version": "1.1.0",
+  "description": "Extract JD item and search page product data into StandardProduct-compatible JSON.",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": [
+    "https://search.jd.com/*",
+    "https://list.jd.com/*",
+    "https://item.jd.com/*",
+    "https://item.jkcsjd.com/*",
+    "https://item.yiyaojd.com/*",
+    "https://item.jingxi.com/*",
+    "https://api.m.jd.com/*",
+    "https://club.jd.com/*",
+    "https://*.360buyimg.com/*",
+    "https://vod.jd.com/*"
+  ],
+  "action": {
+    "default_title": "Extract JD Product",
+    "default_popup": "popup/popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://search.jd.com/*", "https://list.jd.com/*"],
+      "js": [
+        "src/human-scroll.js",
+        "src/human-mouse.js",
+        "src/search-extractor.js",
+        "src/download.js",
+        "src/search-content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://item.jd.com/*.html*",
+        "https://item.jkcsjd.com/*.html*",
+        "https://item.yiyaojd.com/*.html*",
+        "https://item.jingxi.com/*.html*"
+      ],
+      "js": ["src/human-scroll.js", "src/extractor.js", "src/download.js", "src/content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

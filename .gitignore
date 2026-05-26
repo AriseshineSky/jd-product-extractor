@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Playwright MCP (Cursor debug artifacts)
+.playwright-mcp/
+
+# Local test fixtures (saved JD HTML pages can be large)
+fixtures/
+test-fixtures/
+*.saved.html
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Extension packaging
+*.crx
+*.pem
+*.zip
+
+# Optional local output (if copied into repo for debugging)
+*.jsonl
