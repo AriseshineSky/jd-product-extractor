@@ -30,6 +30,15 @@ function isJdHomeUrl(url) {
   }
 }
 
+function isJdListUrl(url) {
+  try {
+    const u = new URL(url);
+    return /^(search|list)\.jd\.com$/i.test(u.hostname);
+  } catch (_) {
+    return /^https:\/\/(search|list)\.jd\.com\//i.test(url || "");
+  }
+}
+
 function isJdBlockedUrl(url) {
   return isJdRiskUrl(url) || isJdHomeUrl(url);
 }
@@ -562,6 +571,202 @@ function riskBlockedError(url) {
   return err;
 }
 
+function riskPauseReason(url) {
+  const u = String(url || "").toLowerCase();
+  if (u.includes("risk_handler") || u.includes("cfe.m.jd.com")) {
+    return "京东滑块/人机验证（risk_handler），请在本页完成验证";
+  }
+  if (isJdHomeUrl(url)) return "已跳转到京东首页，请完成验证后返回搜索页";
+  if (isJdRiskUrl(url)) return "京东登录/验证页，请人工完成验证";
+  return "京东验证或页面异常";
+}
+
+function parseRiskHandlerReturnUrl(riskUrl) {
+  try {
+    const u = new URL(riskUrl);
+    const ret = u.searchParams.get("returnurl");
+    if (!ret) return null;
+    return decodeURIComponent(ret);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function runExtractOnTab(tabId, url, options = {}) {
+  await injectItemExtractScripts(tabId);
+  assertCrawlJobNotStopped();
+
+  const extractPromise = chrome.tabs.sendMessage(tabId, {
+    type: "EXTRACT_JD_PRODUCT_WITH_SCROLL",
+    options: {
+      scroll: true,
+      save: false,
+      download: false,
+      ...(options.extract || {}),
+    },
+  });
+
+  const stopPromise = new Promise((_, reject) => {
+    const poll = setInterval(() => {
+      if (!crawlJob.stopped) return;
+      clearInterval(poll);
+      reject(crawlJobUserStoppedError());
+    }, 250);
+    extractPromise.finally(() => clearInterval(poll));
+  });
+
+  const response = await Promise.race([extractPromise, stopPromise]);
+  if (!response?.ok) {
+    if (response?.code === "USER_STOPPED") throw crawlJobUserStoppedError();
+    throw new Error(response?.error || "详情页提取失败");
+  }
+
+  const { _validation_errors, ...product } = response.data;
+  const saved = await appendProduct(product);
+  appendCrawlLog("extract_ok", url);
+  return {
+    ok: true,
+    product,
+    validation_errors: _validation_errors || [],
+    saved,
+  };
+}
+
+async function extractProductFromExistingTab(tabId, url, options = {}) {
+  crawlJob.detailTabId = tabId;
+  try {
+    assertCrawlJobNotStopped();
+    await sleepUnlessStopped(options.afterLoadMs || 2500);
+    const tabInfo = await chrome.tabs.get(tabId);
+    if (isJdBlockedUrl(tabInfo.url) || isJdRiskUrl(tabInfo.url)) {
+      await pauseJobForRisk("detail_tab", tabInfo.url);
+      return buildVerifyWaitResponse(tabInfo.url, tabId);
+    }
+    return await runExtractOnTab(tabId, url, options);
+  } finally {
+    crawlJob.detailTabId = null;
+    try {
+      await chrome.tabs.remove(tabId);
+    } catch (_) {
+      /* ignore */
+    }
+    if (options.returnToTabId) {
+      try {
+        await chrome.tabs.update(options.returnToTabId, { active: true });
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+}
+
+/** 验证通过后：优先在已通过验证的商品标签上提取，避免重开触发二次验证 */
+async function extractAfterVerify(url, options = {}) {
+  if (crawlJob.detailTabId != null) {
+    try {
+      const tab = await chrome.tabs.get(crawlJob.detailTabId);
+      const tabUrl = tab.url || "";
+      if (isJdBlockedUrl(tabUrl) || isJdRiskUrl(tabUrl)) {
+        await pauseJobForRisk("detail_tab", tabUrl);
+        return buildVerifyWaitResponse(tabUrl, crawlJob.detailTabId);
+      }
+      const targetUrl =
+        (tabUrl.includes("risk_handler") ? parseRiskHandlerReturnUrl(tabUrl) : null) || url;
+      if (isItemPageForSku(tabUrl, targetUrl) || isItemPageUrl(tabUrl)) {
+        appendCrawlLog("extract_after_verify", targetUrl);
+        if (crawlJob.pauseReason === "risk") crawlJobResume();
+        return await extractProductFromExistingTab(crawlJob.detailTabId, targetUrl, options);
+      }
+    } catch (_) {
+      /* fall through to new tab */
+    }
+  }
+  if (crawlJob.pauseReason === "risk") crawlJobResume();
+  return extractProductInNewTabOnce(url, options);
+}
+
+async function pauseJobForRisk(source, url) {
+  crawlJobPause("risk");
+  appendCrawlLog("job_pause_risk", `${source} ${String(url || "").slice(0, 80)}`);
+  const cp = await loadCheckpoint();
+  if (cp?.kind) {
+    await mergeCheckpoint({
+      ...cp,
+      paused_reason: "risk",
+      stop_reason: riskPauseReason(url),
+      last_status: "等待人工完成验证（验证页保持打开）",
+    });
+  }
+  if (crawlJob.tabId) {
+    chrome.tabs
+      .sendMessage(crawlJob.tabId, {
+        type: "CRAWL_BLOCKED_BY_RISK",
+        url,
+        reason: isJdHomeUrl(url) ? "home" : "risk",
+      })
+      .catch(() => {});
+  }
+}
+
+async function cleanupVerifyDetailTab() {
+  if (crawlJob.detailTabId == null) return;
+  try {
+    await chrome.tabs.remove(crawlJob.detailTabId);
+  } catch (_) {
+    /* ignore */
+  }
+  crawlJob.detailTabId = null;
+  if (crawlJob.tabId) {
+    try {
+      await chrome.tabs.update(crawlJob.tabId, { active: true });
+    } catch (_) {
+      /* ignore */
+    }
+  }
+}
+
+/** 验证是否已通过（详情验证页或搜索页从验证/首页回到正常地址） */
+async function checkRiskCleared() {
+  if (!crawlJob.active) {
+    return { cleared: true, reason: "job_inactive" };
+  }
+  if (crawlJob.pauseReason !== "risk") {
+    return { cleared: true, reason: "not_risk_pause" };
+  }
+
+  if (crawlJob.detailTabId != null) {
+    try {
+      const tab = await chrome.tabs.get(crawlJob.detailTabId);
+      const url = tab.url || "";
+      if (isJdBlockedUrl(url) || isJdRiskUrl(url)) {
+        return { cleared: false, waitingOn: "detail_verify", url };
+      }
+      if (isItemPageUrl(url) || isItemPageForSku(url, url)) {
+        return { cleared: true, reason: "detail_verify_passed", keepTab: true };
+      }
+      await cleanupVerifyDetailTab();
+      return { cleared: true, reason: "detail_verify_passed" };
+    } catch (_) {
+      crawlJob.detailTabId = null;
+    }
+  }
+
+  if (crawlJob.tabId != null) {
+    try {
+      const tab = await chrome.tabs.get(crawlJob.tabId);
+      const url = tab.url || "";
+      if (isJdBlockedUrl(url)) {
+        return { cleared: false, waitingOn: "search_verify", url };
+      }
+      return { cleared: true, reason: "search_tab_ok" };
+    } catch (_) {
+      return { cleared: false, waitingOn: "search_tab_missing" };
+    }
+  }
+
+  return { cleared: true, reason: "no_tabs" };
+}
+
 async function extractProductInNewTab(url, options = {}) {
   const maxAttempts = Math.max(1, Math.min(options.maxAttempts ?? 2, 3));
   let lastError;
@@ -574,7 +779,15 @@ async function extractProductInNewTab(url, options = {}) {
       });
     } catch (error) {
       lastError = error;
-      if (error?.code === "JD_RISK_BLOCKED" || crawlJob.stopped) throw error;
+      if (error?.code === "JD_RISK_BLOCKED") {
+        return {
+          ok: false,
+          code: "JD_RISK_BLOCKED",
+          waitVerify: true,
+          error: String(error.message || error),
+        };
+      }
+      if (crawlJob.stopped) throw error;
       const msg = String(error?.message || error);
       const retriable = /加载超时|标签已关闭|提取失败|Could not establish|被重定向|Cannot access contents/i.test(
         msg
@@ -590,12 +803,23 @@ async function extractProductInNewTab(url, options = {}) {
   throw lastError;
 }
 
+function buildVerifyWaitResponse(url, tabId) {
+  return {
+    ok: false,
+    code: "JD_RISK_BLOCKED",
+    waitVerify: true,
+    verifyTabId: tabId,
+    error: riskPauseReason(url),
+  };
+}
+
 async function extractProductInNewTabOnce(url, options = {}) {
   assertCrawlJobNotStopped();
   assertCrawlJobNotRiskPaused();
   appendCrawlLog("extract_start", url);
   const tab = await chrome.tabs.create({ url, active: options.activateTab === true });
   crawlJob.detailTabId = tab.id;
+  let keepVerifyTabOpen = false;
   try {
     if (crawlJob.stopped) throw crawlJobUserStoppedError();
     await waitForItemTabReady(tab.id, url, options.tabTimeoutMs || 90000);
@@ -606,55 +830,32 @@ async function extractProductInNewTabOnce(url, options = {}) {
     const tabInfo = await chrome.tabs.get(tab.id);
     if (isJdBlockedUrl(tabInfo.url) || isJdRiskUrl(tabInfo.url)) {
       appendCrawlLog("extract_risk", tabInfo.url);
-      throw riskBlockedError(tabInfo.url);
+      keepVerifyTabOpen = true;
+      await pauseJobForRisk("detail_tab", tabInfo.url);
+      return buildVerifyWaitResponse(tabInfo.url, tab.id);
     }
 
     await injectItemExtractScripts(tab.id);
 
     assertCrawlJobNotStopped();
 
-    const extractPromise = chrome.tabs.sendMessage(tab.id, {
-      type: "EXTRACT_JD_PRODUCT_WITH_SCROLL",
-      options: {
-        scroll: true,
-        save: false,
-        download: false,
-        ...(options.extract || {}),
-      },
-    });
-
-    const stopPromise = new Promise((_, reject) => {
-      const poll = setInterval(() => {
-        if (!crawlJob.stopped) return;
-        clearInterval(poll);
-        reject(crawlJobUserStoppedError());
-      }, 250);
-      extractPromise.finally(() => clearInterval(poll));
-    });
-
-    const response = await Promise.race([extractPromise, stopPromise]);
-
-    if (!response?.ok) {
-      if (response?.code === "USER_STOPPED") {
-        throw crawlJobUserStoppedError();
-      }
-      throw new Error(response?.error || "详情页提取失败");
-    }
-
-    const { _validation_errors, ...product } = response.data;
-    const saved = await appendProduct(product);
-    appendCrawlLog("extract_ok", url);
-
-    return {
-      ok: true,
-      product,
-      validation_errors: _validation_errors || [],
-      saved,
-    };
+    const result = await runExtractOnTab(tab.id, url, options);
+    return result;
   } catch (error) {
+    if (error?.code === "JD_RISK_BLOCKED") {
+      keepVerifyTabOpen = true;
+      const tabInfo = await chrome.tabs.get(tab.id).catch(() => null);
+      await pauseJobForRisk("detail_tab", tabInfo?.url || url);
+      appendCrawlLog("extract_verify_wait", url);
+      return buildVerifyWaitResponse(tabInfo?.url || url, tab.id);
+    }
     appendCrawlLog("extract_fail", `${url} ${error?.message || error}`);
     throw error;
   } finally {
+    if (keepVerifyTabOpen) {
+      crawlJob.detailTabId = tab.id;
+      return;
+    }
     crawlJob.detailTabId = null;
     try {
       await chrome.tabs.remove(tab.id);
@@ -672,20 +873,48 @@ async function extractProductInNewTabOnce(url, options = {}) {
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!crawlJob.active || tabId !== crawlJob.tabId) return;
-  // 仅在 URL 实际变为验证/首页时触发，避免 complete 事件误判导致任务假死
-  const url = changeInfo.url;
-  if (!url || !isJdBlockedUrl(url)) return;
+  if (!crawlJob.active) return;
 
-  appendCrawlLog("search_tab_risk", url);
-  crawlJobPause("risk");
-  chrome.tabs
-    .sendMessage(tabId, {
-      type: "CRAWL_BLOCKED_BY_RISK",
-      url,
-      reason: isJdHomeUrl(url) ? "home" : "risk",
-    })
-    .catch(() => {});
+  if (crawlJob.detailTabId === tabId && changeInfo.url) {
+    if (isJdRiskUrl(changeInfo.url)) {
+      pauseJobForRisk("detail_tab", changeInfo.url).catch(() => {});
+    } else if (
+      crawlJob.pauseReason === "risk" &&
+      (isItemPageUrl(changeInfo.url) ||
+        isItemPageForSku(changeInfo.url, parseRiskHandlerReturnUrl(changeInfo.url) || ""))
+    ) {
+      crawlJobResume();
+      appendCrawlLog("verify_cleared", "detail_tab_item");
+      if (crawlJob.tabId) {
+        chrome.tabs
+          .sendMessage(crawlJob.tabId, {
+            type: "CRAWL_VERIFY_CLEARED",
+            source: "detail_tab",
+          })
+          .catch(() => {});
+      }
+    }
+    return;
+  }
+
+  if (tabId !== crawlJob.tabId) return;
+
+  if (changeInfo.url && isJdBlockedUrl(changeInfo.url)) {
+    pauseJobForRisk("search_tab", changeInfo.url).catch(() => {});
+    return;
+  }
+
+  if (
+    changeInfo.url &&
+    crawlJob.pauseReason === "risk" &&
+    isJdListUrl(changeInfo.url)
+  ) {
+    crawlJobResume();
+    appendCrawlLog("verify_cleared", "search_tab_url");
+    chrome.tabs
+      .sendMessage(tabId, { type: "CRAWL_VERIFY_CLEARED", source: "search_tab" })
+      .catch(() => {});
+  }
 });
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -740,6 +969,29 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       .then((result) => sendResponse(result))
       .catch((error) => {
         const code = error.code || undefined;
+        sendResponse({
+          ok: false,
+          error: String(error.message || error),
+          code,
+        });
+      });
+    return true;
+  }
+
+  if (message?.type === "EXTRACT_AFTER_VERIFY") {
+    extractAfterVerify(message.url, message.options || {})
+      .then((result) => sendResponse(result))
+      .catch((error) => {
+        const code = error.code || undefined;
+        if (code === "JD_RISK_BLOCKED") {
+          sendResponse({
+            ok: false,
+            code,
+            waitVerify: true,
+            error: String(error.message || error),
+          });
+          return;
+        }
         sendResponse({
           ok: false,
           error: String(error.message || error),
@@ -859,6 +1111,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           })
         )
       )
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+
+  if (message?.type === "CHECK_RISK_CLEARED") {
+    checkRiskCleared()
+      .then((result) => {
+        if (result.cleared && crawlJob.active && crawlJob.pauseReason === "risk") {
+          crawlJobResume();
+          appendCrawlLog("verify_cleared", result.reason || "poll");
+        }
+        sendResponse({ ok: true, ...result });
+      })
       .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }

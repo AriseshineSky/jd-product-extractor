@@ -93,6 +93,25 @@
           border: 1px solid rgba(148, 163, 184, 0.35);
           display: none;
           box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+          pointer-events: auto;
+          cursor: default;
+        }
+        #jd-search-job-status-toggle {
+          position: fixed;
+          right: 18px;
+          bottom: 120px;
+          z-index: 2147483646;
+          border: none;
+          border-radius: 999px;
+          padding: 8px 12px;
+          font-size: 11px;
+          font-weight: 600;
+          color: #e5e7eb;
+          background: rgba(15, 23, 42, 0.88);
+          border: 1px solid rgba(148, 163, 184, 0.35);
+          cursor: pointer;
+          display: none;
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
         }
         #jd-search-job-status[data-visible="1"] { display: block; }
         #jd-search-job-status[data-running="1"] { border-color: rgba(52, 211, 153, 0.55); }
@@ -200,12 +219,42 @@
     statusHud.id = "jd-search-job-status";
     statusHud.setAttribute("aria-live", "polite");
     document.documentElement.appendChild(statusHud);
+    bindJobStatusHudBehavior(statusHud);
+
+    const statusToggle = document.createElement("button");
+    statusToggle.id = "jd-search-job-status-toggle";
+    statusToggle.type = "button";
+    statusToggle.textContent = "任务状态";
+    statusToggle.title = "点击展开任务进度";
+    statusToggle.addEventListener("click", () => {
+      statusHud.dataset.userOpen = "1";
+      updateJobStatusHud();
+    });
+    document.documentElement.appendChild(statusToggle);
 
     document.documentElement.appendChild(panel);
     syncJobControlsFromBackground();
     refreshResumeButton();
     updateJobStatusHud();
     tryAutoResumeAfterNav();
+    tryResumeAfterVerifyOnLoad();
+  }
+
+  /** 搜索页从验证页跳回后，内容脚本重新注入时恢复任务 */
+  async function tryResumeAfterVerifyOnLoad() {
+    if (sessionStorage.getItem(AUTO_RESUME_FLAG) === "1") return;
+    const [state, cp] = await Promise.all([getCrawlJobState(), loadCheckpoint()]);
+    if (!cp?.kind || !state.active || state.pauseReason !== "risk") return;
+    const ready = await waitForSearchCards(8000);
+    if (!ready) return;
+    try {
+      const check = await sendRuntimeMessage({ type: "CHECK_RISK_CLEARED" });
+      if (!check?.cleared) return;
+      showToast("验证已通过，正在恢复任务…");
+      await runResumeJob({ skipNavigation: true });
+    } catch (_) {
+      /* ignore */
+    }
   }
 
   function setAllButtonsDisabled(disabled) {
@@ -294,10 +343,56 @@
       return "状态：未运行";
     }
     if (state.paused && state.pauseReason === "risk") {
-      return "状态：已中断（京东验证/首页）— 请验证后点「继续未完成任务」";
+      return "状态：等待京东验证 — 请在本页完成验证，通过后自动继续";
     }
     if (state.paused) return "状态：已暂停 — 点「继续」恢复";
     return "状态：运行中";
+  }
+
+  function hideJobStatusHud() {
+    const hud = document.getElementById("jd-search-job-status");
+    if (hud) {
+      hud.dataset.visible = "0";
+      hud.dataset.userOpen = "0";
+    }
+    clearTimeout(hideJobStatusHud._timer);
+    hideJobStatusHud._timer = null;
+    syncJobStatusToggle();
+  }
+
+  function syncJobStatusToggle() {
+    const hud = document.getElementById("jd-search-job-status");
+    const toggle = document.getElementById("jd-search-job-status-toggle");
+    if (!toggle) return;
+    const showToggle =
+      hud?.dataset.hasCheckpoint === "1" && hud?.dataset.visible !== "1";
+    toggle.style.display = showToggle ? "inline-block" : "none";
+  }
+
+  function scheduleJobStatusAutoHide(ms = 8000) {
+    clearTimeout(hideJobStatusHud._timer);
+    hideJobStatusHud._timer = setTimeout(() => {
+      const hud = document.getElementById("jd-search-job-status");
+      if (!hud || hud.dataset.visible !== "1") return;
+      if (hud.matches(":hover")) {
+        scheduleJobStatusAutoHide(3000);
+        return;
+      }
+      if (hud.dataset.running === "1" || hud.dataset.paused === "1") return;
+      hideJobStatusHud();
+    }, ms);
+  }
+
+  function bindJobStatusHudBehavior(hud) {
+    if (hud.dataset.leaveBound) return;
+    hud.dataset.leaveBound = "1";
+    hud.addEventListener("mouseenter", () => {
+      clearTimeout(hideJobStatusHud._timer);
+    });
+    hud.addEventListener("mouseleave", () => {
+      if (hud.dataset.running === "1" || hud.dataset.paused === "1") return;
+      scheduleJobStatusAutoHide(600);
+    });
   }
 
   async function updateJobStatusHud() {
@@ -308,11 +403,15 @@
     const show = state.active || Boolean(cp?.kind);
     if (!show) {
       hud.dataset.visible = "0";
+      hud.dataset.hasCheckpoint = "0";
       hud.textContent = "";
+      syncJobStatusToggle();
       return;
     }
 
+    hud.dataset.hasCheckpoint = "1";
     hud.dataset.visible = "1";
+    syncJobStatusToggle();
     hud.dataset.running = state.active && !state.paused ? "1" : "0";
     hud.dataset.paused = state.paused ? "1" : "0";
     hud.dataset.stopped = !state.active && cp?.kind ? "1" : "0";
@@ -344,7 +443,20 @@
 
     if (cp?.last_status && state.active) lines.push(`步骤：${cp.last_status}`);
     if (cp?.stop_reason && !state.active) {
-      lines.push(`停止原因：${cp.stop_reason}`);
+      const sr = String(cp.stop_reason);
+      const onSearch =
+        window.JdPageUrl?.isJdListUrl(location.href) &&
+        JdSearchExtractor.findSearchCards().length > 0;
+      if (onSearch && /页面不可用/.test(sr)) {
+        lines.push("停止原因：任务已暂停（搜索页正常，可点「继续未完成任务」）");
+      } else {
+        lines.push(`停止原因：${sr}`);
+      }
+    }
+    if (!state.active && cp?.kind) {
+      lines.push(
+        "验证/中断后：请在验证页完成人工验证，通过后自动继续；或稍后打开原搜索页点「继续未完成任务」"
+      );
     }
 
     hud.innerHTML = lines
@@ -356,6 +468,13 @@
         return `<p class="${cls}">${line.replace(/</g, "&lt;")}</p>`;
       })
       .join("");
+
+    if (!state.active && !state.paused) {
+      const userOpen = hud.dataset.userOpen === "1";
+      scheduleJobStatusAutoHide(userOpen ? 15000 : 8000);
+    } else {
+      clearTimeout(hideJobStatusHud._timer);
+    }
   }
 
   const UNLOAD_GUARD_MESSAGE =
@@ -460,21 +579,60 @@
     return err;
   }
 
+  function isVerifyWait(result) {
+    return Boolean(result?.waitVerify || (result?.code === JD_RISK_BLOCKED && result?.ok === false));
+  }
+
+  /** 检测到京东验证时：保持验证页打开，轮询直到人工通过后自动继续 */
+  async function waitForManualVerification() {
+    let toastShown = false;
+    while (true) {
+      const state = await getCrawlJobState();
+      if (state.stopped || !state.active) throw userStoppedError();
+      if (!state.paused || state.pauseReason !== "risk") return;
+
+      if (!toastShown) {
+        showToast(
+          "检测到京东验证：请在页面人工完成验证，通过后任务将自动继续（不会自动关闭验证页）",
+          true
+        );
+        toastShown = true;
+      }
+      setLiveProgress("等待人工完成京东验证…");
+      updateJobStatusHud();
+
+      try {
+        const check = await sendRuntimeMessage({ type: "CHECK_RISK_CLEARED" });
+        if (check?.cleared) {
+          await recordCrawlStatus({
+            last_status: "验证已通过，继续抓取",
+            stop_reason: "",
+          });
+          showToast("验证已通过，继续抓取…");
+          return;
+        }
+      } catch (_) {
+        /* 后台短暂不可达，继续轮询 */
+      }
+      await sleep(1500);
+    }
+  }
+
   async function crawlJobCheckpoint() {
     let state = await getCrawlJobState();
     if (state.stopped || !state.active) throw userStoppedError();
 
     if (state.paused && state.pauseReason === "risk") {
-      await recordCrawlStatus({
-        stop_reason: "京东验证或跳转首页（自动检测）",
-        last_status: "等待用户完成验证",
-      });
-      const err = new Error("京东验证中断");
-      err.code = JD_RISK_BLOCKED;
-      throw err;
+      await waitForManualVerification();
+      state = await getCrawlJobState();
     }
 
     while (state.paused && !state.stopped) {
+      if (state.pauseReason === "risk") {
+        await waitForManualVerification();
+        state = await getCrawlJobState();
+        break;
+      }
       setLiveProgress("任务已暂停，等待点「继续」");
       updateJobStatusHud();
       const pauseBtn = document.getElementById("jd-search-pause-job-btn");
@@ -482,11 +640,6 @@
       await sleep(400);
       state = await getCrawlJobState();
       if (state.stopped || !state.active) throw userStoppedError();
-      if (state.paused && state.pauseReason === "risk") {
-        const err = new Error("京东验证中断");
-        err.code = JD_RISK_BLOCKED;
-        throw err;
-      }
     }
 
     state = await getCrawlJobState();
@@ -671,12 +824,36 @@
   }
 
   function assertNotRiskBlocked() {
+    if (window.JdPageUrl?.isJdListUrl(location.href)) return;
+    if (
+      window.JdSearchExtractor?.findSearchCards?.()?.length &&
+      /search\.jd\.com|list\.jd\.com/i.test(location.href)
+    ) {
+      return;
+    }
     if (!window.JdRisk?.isBlockedContext) return;
     if (window.JdRisk.isBlockedContext(location.href, document.title)) {
       const err = new Error(window.JdRisk.blockedReason(location.href, document.title));
       err.code = JD_RISK_BLOCKED;
       throw err;
     }
+  }
+
+  async function extractWithVerifyRetry(url, options, checkpointState) {
+    let result = await sendRuntimeMessage({
+      type: "EXTRACT_URL_IN_NEW_TAB",
+      url,
+      options,
+    });
+    if (isVerifyWait(result) || isRiskBlocked(result)) {
+      await handleRiskBlocked(checkpointState);
+      result = await sendRuntimeMessage({
+        type: "EXTRACT_AFTER_VERIFY",
+        url,
+        options,
+      });
+    }
+    return result;
   }
 
   async function handleRiskBlocked(state) {
@@ -688,18 +865,14 @@
       searchUrl: state.searchUrl || location.href,
       paused_reason: "risk",
       stop_reason: reason,
-      last_status: "因京东验证中断",
+      last_status: "等待人工完成验证（验证页保持打开）",
     });
-    await sendRuntimeMessage({ type: "CRAWL_JOB_PAUSE", reason: "risk" });
-    await refreshResumeButton();
+    const jobState = await getCrawlJobState();
+    if (!jobState.paused || jobState.pauseReason !== "risk") {
+      await sendRuntimeMessage({ type: "CRAWL_JOB_PAUSE", reason: "risk" });
+    }
     updateJobStatusHud();
-    showToast(
-      `遇到${reason}，进度已保存。请完成验证后回到搜索页，点「继续未完成任务」`,
-      true
-    );
-    const err = new Error("京东验证中断");
-    err.code = JD_RISK_BLOCKED;
-    throw err;
+    await waitForManualVerification();
   }
 
   async function waitForSearchCards(timeoutMs = 20000) {
@@ -785,6 +958,11 @@
       return;
     }
 
+    const jobState = await getCrawlJobState();
+    if (jobState.active) {
+      await sendRuntimeMessage({ type: "CRAWL_JOB_END", clearCheckpoint: false });
+    }
+
     if (!options.skipNavigation) {
       const ready = await ensureSearchPageReady(cp.searchUrl);
       if (!ready) return;
@@ -862,7 +1040,9 @@
     const toast = document.getElementById("jd-search-extractor-toast");
     if (toast) toast.style.display = "none";
     clearTimeout(showToast._timer);
+    clearTimeout(showToast._leaveTimer);
     showToast._timer = null;
+    showToast._leaveTimer = null;
   }
 
   function bindSearchToastBehavior(toast) {
@@ -870,9 +1050,14 @@
     toast.dataset.leaveBound = "1";
     toast.addEventListener("mouseenter", () => {
       clearTimeout(showToast._timer);
+      clearTimeout(showToast._leaveTimer);
       showToast._timer = null;
+      showToast._leaveTimer = null;
     });
-    toast.addEventListener("mouseleave", hideSearchToast);
+    toast.addEventListener("mouseleave", () => {
+      clearTimeout(showToast._leaveTimer);
+      showToast._leaveTimer = setTimeout(hideSearchToast, 200);
+    });
   }
 
   function showToast(text, isError = false) {
@@ -887,14 +1072,18 @@
     toast.style.background = isError ? "rgba(185, 28, 28, 0.95)" : "rgba(17, 24, 39, 0.92)";
     toast.textContent = text;
     clearTimeout(showToast._timer);
-    if (!toast.matches(":hover")) {
-      showToast._timer = setTimeout(hideSearchToast, 8000);
-    }
+    clearTimeout(showToast._leaveTimer);
+    showToast._timer = setTimeout(() => {
+      if (toast.matches(":hover")) return;
+      hideSearchToast();
+    }, isError ? 10000 : 6000);
   }
 
   function hideResumeTooltip() {
     const tip = document.getElementById("jd-search-resume-tooltip");
     if (tip) tip.dataset.visible = "0";
+    clearTimeout(hideResumeTooltip._timer);
+    hideResumeTooltip._timer = null;
   }
 
   function showResumeTooltip(anchor, text) {
@@ -905,11 +1094,7 @@
       tip.setAttribute("role", "tooltip");
       document.documentElement.appendChild(tip);
       tip.addEventListener("mouseleave", hideResumeTooltip);
-      document.addEventListener(
-        "scroll",
-        hideResumeTooltip,
-        true
-      );
+      document.addEventListener("scroll", hideResumeTooltip, true);
     }
     tip.textContent = text;
     const rect = anchor.getBoundingClientRect();
@@ -918,6 +1103,8 @@
     tip.style.left = "auto";
     tip.style.top = "auto";
     tip.dataset.visible = "1";
+    clearTimeout(hideResumeTooltip._timer);
+    hideResumeTooltip._timer = setTimeout(hideResumeTooltip, 6000);
   }
 
   function bindResumeTooltipBehavior(btn) {
@@ -927,7 +1114,10 @@
       const text = btn.dataset.tooltipText;
       if (text) showResumeTooltip(btn, text);
     });
-    btn.addEventListener("mouseleave", hideResumeTooltip);
+    btn.addEventListener("mouseleave", () => {
+      clearTimeout(hideResumeTooltip._timer);
+      hideResumeTooltip._timer = setTimeout(hideResumeTooltip, 300);
+    });
     btn.addEventListener("click", hideResumeTooltip);
   }
 
@@ -1048,6 +1238,8 @@
                 pageNum,
                 cardIndex: startCard,
               });
+              pageNum -= 1;
+              continue;
             }
             throw new Error("当前页未找到商品卡片");
           }
@@ -1099,10 +1291,9 @@
 
             let result;
             try {
-              result = await sendRuntimeMessage({
-                type: "EXTRACT_URL_IN_NEW_TAB",
+              result = await extractWithVerifyRetry(
                 url,
-                options: {
+                {
                   afterLoadMs: 2800,
                   activateTab: true,
                   returnToTabId: searchTabId,
@@ -1110,7 +1301,19 @@
                   maxAttempts: 2,
                   extract: { scroll: true },
                 },
-              });
+                {
+                  kind: "deep-crawl",
+                  searchUrl,
+                  searchTabId,
+                  multiPage,
+                  downloadAtEnd,
+                  maxPages,
+                  delayMs,
+                  stats,
+                  pageNum,
+                  cardIndex: i,
+                }
+              );
             } catch (err) {
               if (isRiskBlocked(err)) {
                 await handleRiskBlocked({
@@ -1125,25 +1328,17 @@
                   pageNum,
                   cardIndex: i,
                 });
+                i -= 1;
+                continue;
               }
               throw err;
             }
 
             if (result?.ok) {
               stats.detailOk += 1;
-            } else if (isRiskBlocked(result)) {
-              await handleRiskBlocked({
-                kind: "deep-crawl",
-                searchUrl,
-                searchTabId,
-                multiPage,
-                downloadAtEnd,
-                maxPages,
-                delayMs,
-                stats,
-                pageNum,
-                cardIndex: i,
-              });
+            } else if (isVerifyWait(result) || isRiskBlocked(result)) {
+              i -= 1;
+              continue;
             } else if (isUserStopped(result) || result?.code === "USER_STOPPED") {
               throw userStoppedError();
             } else {
@@ -1220,22 +1415,13 @@
         return { jobCompleted: true };
       });
     } catch (error) {
-      if (isRiskBlocked(error)) {
-        showToast(
-          `${error?.message || "页面异常"}。进度已保存，验证/刷新搜索页后可点「继续未完成任务」`,
-          true
-        );
-        await refreshResumeButton();
-        updateJobStatusHud();
-        return;
-      }
       if (isUserStopped(error)) {
         const cache = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
         showToast(
           `深度抓取已结束：${stats.pages} 页，详情成功 ${stats.detailOk}、失败 ${stats.detailFail}，详情缓存 ${cache?.count ?? "?"} 条`
         );
         await refreshResumeButton();
-      } else {
+      } else if (!isRiskBlocked(error)) {
         showToast(String(error.message || error), true);
       }
     }
@@ -1297,17 +1483,23 @@
 
           let result;
           try {
-            result = await sendRuntimeMessage({
-              type: "EXTRACT_URL_IN_NEW_TAB",
-              url: entry.url,
-              options: {
+            result = await extractWithVerifyRetry(
+              entry.url,
+              {
                 afterLoadMs: 2500,
                 activateTab: true,
                 tabTimeoutMs: 90000,
                 maxAttempts: 2,
                 extract: { scroll: true },
               },
-            });
+              {
+                kind: "batch-detail",
+                searchUrl,
+                delayMs,
+                queueIndex: i,
+                stats: { ok, fail },
+              }
+            );
           } catch (err) {
             if (isRiskBlocked(err)) {
               await handleRiskBlocked({
@@ -1317,20 +1509,17 @@
                 queueIndex: i,
                 stats: { ok, fail },
               });
+              i -= 1;
+              continue;
             }
             throw err;
           }
 
           if (result?.ok) {
             ok += 1;
-          } else if (isRiskBlocked(result)) {
-            await handleRiskBlocked({
-              kind: "batch-detail",
-              searchUrl,
-              delayMs,
-              queueIndex: i,
-              stats: { ok, fail },
-            });
+          } else if (isVerifyWait(result) || isRiskBlocked(result)) {
+            i -= 1;
+            continue;
           } else if (isUserStopped(result) || result?.code === "USER_STOPPED") {
             throw userStoppedError();
           } else {
@@ -1435,34 +1624,15 @@
         updateJobStatusHud();
       }
       if (message?.type === "CRAWL_BLOCKED_BY_RISK") {
-        (async () => {
-          const cp = await loadCheckpoint();
-          const reason =
-            message.reason === "home"
-              ? "搜索页跳转到京东首页"
-              : "搜索页跳转到验证/登录页";
-          if (cp?.kind) {
-            await mergeCheckpoint({
-              ...cp,
-              paused_reason: "risk",
-              stop_reason: reason,
-              last_status: "搜索页 URL 异常",
-            });
-          } else {
-            await mergeCheckpoint({
-              paused_reason: "risk",
-              stop_reason: reason,
-              searchUrl: location.href,
-              last_status: "搜索页 URL 异常",
-            });
-          }
-          await refreshResumeButton();
-          updateJobStatusHud();
-          showToast(
-            `${reason}，任务已保存进度。请完成验证后点「继续未完成任务」`,
-            true
-          );
-        })();
+        showToast(
+          "搜索页出现京东验证：请在本页人工完成验证，通过后任务将自动继续（不会关闭验证页）",
+          true
+        );
+        updateJobStatusHud();
+      }
+      if (message?.type === "CRAWL_VERIFY_CLEARED") {
+        showToast("验证已通过，继续抓取…");
+        updateJobStatusHud();
       }
     });
   }

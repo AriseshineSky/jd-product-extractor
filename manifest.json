@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JD Product Extractor",
-  "version": "1.2.7",
+  "version": "1.3.1",
   "description": "Extract JD item and search page product data into StandardProduct-compatible JSON.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [

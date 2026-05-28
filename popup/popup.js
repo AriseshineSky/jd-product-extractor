@@ -342,7 +342,7 @@ async function refreshJobStatus() {
     const lines = [];
     if (state?.active && !state?.paused) lines.push("插件：运行中");
     else if (state?.paused && state?.pauseReason === "risk") {
-      lines.push("插件：已中断（京东验证）");
+      lines.push("插件：等待京东验证 — 请人工完成，通过后自动继续");
     } else if (state?.paused) lines.push("插件：已暂停");
     else lines.push("插件：已停止（可续跑）");
 
