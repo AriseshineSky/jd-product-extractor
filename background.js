@@ -4,6 +4,11 @@ const DETAIL_STORAGE_KEY = "jd_jsonl_records";
 const LINK_STORAGE_KEY = "jd_product_url_queue";
 /** 验证/跳转首页后可恢复的抓取进度 */
 const CHECKPOINT_STORAGE_KEY = "jd_crawl_checkpoint";
+/** 续跑进度备份（主 checkpoint 被误清时可恢复） */
+const CHECKPOINT_BACKUP_KEY = "jd_crawl_checkpoint_backup";
+/** 最近任务事件（诊断「抓几条就停」） */
+const CRAWL_LOG_STORAGE_KEY = "jd_crawl_log";
+const CRAWL_LOG_MAX = 40;
 
 function isJdRiskUrl(url) {
   if (!url) return false;
@@ -30,18 +35,29 @@ function isJdBlockedUrl(url) {
 }
 
 async function loadCheckpoint() {
-  const stored = await chrome.storage.local.get(CHECKPOINT_STORAGE_KEY);
+  const stored = await chrome.storage.local.get([
+    CHECKPOINT_STORAGE_KEY,
+    CHECKPOINT_BACKUP_KEY,
+  ]);
   const cp = stored[CHECKPOINT_STORAGE_KEY];
-  return cp && typeof cp === "object" ? cp : null;
+  if (cp && typeof cp === "object" && cp.kind) return cp;
+  const backup = stored[CHECKPOINT_BACKUP_KEY];
+  if (backup && typeof backup === "object" && backup.kind) {
+    await chrome.storage.local.set({ [CHECKPOINT_STORAGE_KEY]: backup });
+    appendCrawlLog("checkpoint_restore", backup.kind);
+    return backup;
+  }
+  return null;
 }
 
 async function saveCheckpoint(checkpoint) {
-  await chrome.storage.local.set({
-    [CHECKPOINT_STORAGE_KEY]: {
-      ...checkpoint,
-      updated_at: new Date().toISOString(),
-    },
-  });
+  const row = {
+    ...checkpoint,
+    updated_at: new Date().toISOString(),
+  };
+  const payload = { [CHECKPOINT_STORAGE_KEY]: row };
+  if (row.kind) payload[CHECKPOINT_BACKUP_KEY] = row;
+  await chrome.storage.local.set(payload);
 }
 
 async function mergeCheckpoint(patch) {
@@ -50,7 +66,7 @@ async function mergeCheckpoint(patch) {
 }
 
 async function clearCheckpoint() {
-  await chrome.storage.local.remove(CHECKPOINT_STORAGE_KEY);
+  await chrome.storage.local.remove([CHECKPOINT_STORAGE_KEY, CHECKPOINT_BACKUP_KEY]);
 }
 
 async function loadDetailRecords() {
@@ -119,11 +135,31 @@ function sleep(ms) {
 const crawlJob = {
   active: false,
   paused: false,
+  /** @type {null|'user'|'risk'} */
+  pauseReason: null,
   stopped: false,
   kind: null,
   tabId: null,
   detailTabId: null,
 };
+
+async function appendCrawlLog(event, detail) {
+  try {
+    const stored = await chrome.storage.local.get(CRAWL_LOG_STORAGE_KEY);
+    const prev = Array.isArray(stored[CRAWL_LOG_STORAGE_KEY])
+      ? stored[CRAWL_LOG_STORAGE_KEY]
+      : [];
+    const row = {
+      at: new Date().toISOString(),
+      event: String(event || "log"),
+      detail: detail != null ? String(detail).slice(0, 240) : "",
+    };
+    const next = [...prev, row].slice(-CRAWL_LOG_MAX);
+    await chrome.storage.local.set({ [CRAWL_LOG_STORAGE_KEY]: next });
+  } catch (_) {
+    /* ignore */
+  }
+}
 
 function crawlJobUserStoppedError() {
   const err = new Error("任务已结束");
@@ -139,6 +175,7 @@ function getCrawlJobState() {
   return {
     active: crawlJob.active,
     paused: crawlJob.paused,
+    pauseReason: crawlJob.pauseReason,
     stopped: crawlJob.stopped,
     kind: crawlJob.kind,
     tabId: crawlJob.tabId,
@@ -153,32 +190,41 @@ function broadcastCrawlJobState() {
 function crawlJobStart(kind, tabId) {
   crawlJob.active = true;
   crawlJob.paused = false;
+  crawlJob.pauseReason = null;
   crawlJob.stopped = false;
   crawlJob.kind = kind;
   crawlJob.tabId = tabId ?? null;
   crawlJob.detailTabId = null;
+  appendCrawlLog("job_start", kind);
   broadcastCrawlJobState();
 }
 
 function crawlJobEnd() {
+  const kind = crawlJob.kind;
   crawlJob.active = false;
   crawlJob.paused = false;
+  crawlJob.pauseReason = null;
   crawlJob.stopped = false;
   crawlJob.kind = null;
   crawlJob.tabId = null;
   crawlJob.detailTabId = null;
+  appendCrawlLog("job_end", kind || "");
   broadcastCrawlJobState();
 }
 
-function crawlJobPause() {
+function crawlJobPause(reason = "user") {
   if (!crawlJob.active) return;
   crawlJob.paused = true;
+  crawlJob.pauseReason = reason === "risk" ? "risk" : "user";
+  appendCrawlLog("job_pause", crawlJob.pauseReason);
   broadcastCrawlJobState();
 }
 
 function crawlJobResume() {
   if (!crawlJob.active) return;
   crawlJob.paused = false;
+  crawlJob.pauseReason = null;
+  appendCrawlLog("job_resume", crawlJob.kind || "");
   broadcastCrawlJobState();
 }
 
@@ -186,6 +232,7 @@ function crawlJobStop() {
   if (!crawlJob.active) return;
   crawlJob.stopped = true;
   crawlJob.paused = false;
+  crawlJob.pauseReason = null;
   if (crawlJob.detailTabId != null) {
     chrome.tabs.remove(crawlJob.detailTabId).catch(() => {});
     crawlJob.detailTabId = null;
@@ -193,11 +240,18 @@ function crawlJobStop() {
   broadcastCrawlJobState();
 }
 
+function assertCrawlJobNotRiskPaused() {
+  if (crawlJob.paused && crawlJob.pauseReason === "risk") {
+    throw riskBlockedError("search-tab-risk-pause");
+  }
+}
+
 async function sleepUnlessStopped(ms) {
   const step = 250;
   let remaining = ms;
   while (remaining > 0) {
     assertCrawlJobNotStopped();
+    assertCrawlJobNotRiskPaused();
     const chunk = Math.min(step, remaining);
     await sleep(chunk);
     remaining -= chunk;
@@ -245,6 +299,200 @@ function waitForTabComplete(tabId, timeoutMs = 60000) {
         resolve();
       }
     });
+  });
+}
+
+const ITEM_PAGE_URL_RE =
+  /^https:\/\/item\.(jd|jkcsjd|yiyaojd|jingxi)\.com\/(\d+)\.html/i;
+
+function skuFromItemUrl(url) {
+  const m = String(url || "").match(/(\d+)\.html/i);
+  return m ? m[1] : null;
+}
+
+function isItemPageUrl(url) {
+  return ITEM_PAGE_URL_RE.test(String(url || ""));
+}
+
+function isItemPageForSku(url, expectedUrl) {
+  if (!isItemPageUrl(url)) return false;
+  const expectedSku = skuFromItemUrl(expectedUrl);
+  if (!expectedSku) return true;
+  return skuFromItemUrl(url) === expectedSku;
+}
+
+/** 打开 item 链接后被踢到其他 *.jd.com 子域（常购页、活动页等） */
+function itemRedirectError(currentUrl) {
+  const u = String(currentUrl || "").slice(0, 140);
+  return new Error(`商品页被重定向，无法提取: ${u}`);
+}
+
+async function ensureItemTabOnProductPage(tabId, expectedUrl, tabTimeoutMs = 60000) {
+  for (let navTry = 0; navTry < 2; navTry++) {
+    const tab = await chrome.tabs.get(tabId);
+    const current = tab.url || "";
+    if (isJdBlockedUrl(current) || isJdRiskUrl(current)) {
+      throw riskBlockedError(current);
+    }
+    if (isItemPageForSku(current, expectedUrl)) {
+      return tab;
+    }
+    if (navTry === 0) {
+      appendCrawlLog("extract_redirect_retry", `${expectedUrl} -> ${current.slice(0, 100)}`);
+      await chrome.tabs.update(tabId, { url: expectedUrl });
+      await waitForItemTabReady(tabId, expectedUrl, tabTimeoutMs);
+      await sleepUnlessStopped(1500);
+      continue;
+    }
+    throw itemRedirectError(current);
+  }
+  throw itemRedirectError(expectedUrl);
+}
+
+async function injectItemExtractScripts(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: [
+        "src/jd-page-url.js",
+        "src/jd-scroll-pause.js",
+        "src/human-scroll.js",
+        "src/extractor.js",
+        "src/download.js",
+        "src/content.js",
+      ],
+    });
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (/Cannot access contents of url/i.test(msg)) {
+      let current = msg;
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        current = tab.url || msg;
+      } catch (_) {
+        /* ignore */
+      }
+      throw itemRedirectError(current);
+    }
+    throw err;
+  }
+}
+
+async function pingItemPageDom(tabId) {
+  try {
+    const [injected] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        if (!/item\.(jd|jkcsjd|yiyaojd|jingxi)\.com\/\d+\.html/i.test(location.href)) {
+          return false;
+        }
+        const hasProduct = document.querySelector(
+          ".sku-name, .sku-title-text, .sku-title, .page-right-skuname, [data-sku]"
+        );
+        const textLen = (document.body?.innerText || "").length;
+        return Boolean(hasProduct || textLen > 800);
+      },
+    });
+    return Boolean(injected?.result);
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * 等待京东商品页就绪。JD 详情页常长期处于 loading，不能仅依赖 status=complete。
+ */
+async function waitForItemTabReady(tabId, expectedUrl, timeoutMs = 90000) {
+  const expectedSku = skuFromItemUrl(expectedUrl);
+  const minDomWaitMs = 10000;
+  const start = Date.now();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, val) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(val);
+    };
+
+    const timer = setTimeout(() => {
+      finish(reject, new Error("商品页加载超时"));
+    }, timeoutMs);
+
+    const stopPoll = setInterval(() => {
+      if (!crawlJob.stopped) return;
+      finish(reject, crawlJobUserStoppedError());
+    }, 250);
+
+    function cleanup() {
+      clearTimeout(timer);
+      clearInterval(stopPoll);
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+    }
+
+    function onUpdated(updatedTabId, changeInfo, tab) {
+      if (settled || updatedTabId !== tabId) return;
+      const url = changeInfo.url || tab?.url || "";
+      if (url && (isJdBlockedUrl(url) || isJdRiskUrl(url))) {
+        finish(reject, riskBlockedError(url));
+        return;
+      }
+      if (changeInfo.status !== "complete") return;
+      if (!ITEM_PAGE_URL_RE.test(url)) return;
+      const skuInUrl = skuFromItemUrl(url);
+      if (expectedSku && skuInUrl !== expectedSku) return;
+      finish(resolve);
+    }
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+
+    (async () => {
+      while (!settled && Date.now() - start < timeoutMs) {
+        try {
+          assertCrawlJobNotStopped();
+          assertCrawlJobNotRiskPaused();
+        } catch (err) {
+          finish(reject, err);
+          return;
+        }
+
+        let tab;
+        try {
+          tab = await chrome.tabs.get(tabId);
+        } catch (_) {
+          finish(reject, new Error("商品页标签已关闭"));
+          return;
+        }
+
+        const url = tab.url || "";
+        if (isJdBlockedUrl(url) || isJdRiskUrl(url)) {
+          finish(reject, riskBlockedError(url));
+          return;
+        }
+
+        if (ITEM_PAGE_URL_RE.test(url)) {
+          const skuInUrl = skuFromItemUrl(url);
+          const skuOk = !expectedSku || skuInUrl === expectedSku;
+          if (skuOk && tab.status === "complete") {
+            finish(resolve);
+            return;
+          }
+          if (skuOk && Date.now() - start >= minDomWaitMs) {
+            const domReady = await pingItemPageDom(tabId);
+            if (domReady) {
+              finish(resolve);
+              return;
+            }
+          }
+        } else if (/\.jd\.com/i.test(url) && Date.now() - start >= 15000) {
+          finish(reject, itemRedirectError(url));
+          return;
+        }
+
+        await sleep(500);
+      }
+    })().catch((err) => finish(reject, err));
   });
 }
 
@@ -315,30 +563,53 @@ function riskBlockedError(url) {
 }
 
 async function extractProductInNewTab(url, options = {}) {
+  const maxAttempts = Math.max(1, Math.min(options.maxAttempts ?? 2, 3));
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await extractProductInNewTabOnce(url, {
+        ...options,
+        tabTimeoutMs:
+          options.tabTimeoutMs || (attempt === 1 ? 90000 : 120000),
+      });
+    } catch (error) {
+      lastError = error;
+      if (error?.code === "JD_RISK_BLOCKED" || crawlJob.stopped) throw error;
+      const msg = String(error?.message || error);
+      const retriable = /加载超时|标签已关闭|提取失败|Could not establish|被重定向|Cannot access contents/i.test(
+        msg
+      );
+      if (attempt < maxAttempts && retriable) {
+        appendCrawlLog("extract_retry", `${url} #${attempt}`);
+        await sleepUnlessStopped(2000);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
+async function extractProductInNewTabOnce(url, options = {}) {
   assertCrawlJobNotStopped();
+  assertCrawlJobNotRiskPaused();
+  appendCrawlLog("extract_start", url);
   const tab = await chrome.tabs.create({ url, active: options.activateTab === true });
   crawlJob.detailTabId = tab.id;
   try {
     if (crawlJob.stopped) throw crawlJobUserStoppedError();
-    await waitForTabComplete(tab.id, options.tabTimeoutMs || 60000);
+    await waitForItemTabReady(tab.id, url, options.tabTimeoutMs || 90000);
     await sleepUnlessStopped(options.afterLoadMs || 2500);
+
+    await ensureItemTabOnProductPage(tab.id, url, options.tabTimeoutMs || 60000);
 
     const tabInfo = await chrome.tabs.get(tab.id);
     if (isJdBlockedUrl(tabInfo.url) || isJdRiskUrl(tabInfo.url)) {
+      appendCrawlLog("extract_risk", tabInfo.url);
       throw riskBlockedError(tabInfo.url);
     }
 
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: [
-        "src/jd-page-url.js",
-        "src/jd-scroll-pause.js",
-        "src/human-scroll.js",
-        "src/extractor.js",
-        "src/download.js",
-        "src/content.js",
-      ],
-    });
+    await injectItemExtractScripts(tab.id);
 
     assertCrawlJobNotStopped();
 
@@ -372,6 +643,7 @@ async function extractProductInNewTab(url, options = {}) {
 
     const { _validation_errors, ...product } = response.data;
     const saved = await appendProduct(product);
+    appendCrawlLog("extract_ok", url);
 
     return {
       ok: true,
@@ -379,6 +651,9 @@ async function extractProductInNewTab(url, options = {}) {
       validation_errors: _validation_errors || [],
       saved,
     };
+  } catch (error) {
+    appendCrawlLog("extract_fail", `${url} ${error?.message || error}`);
+    throw error;
   } finally {
     crawlJob.detailTabId = null;
     try {
@@ -398,11 +673,12 @@ async function extractProductInNewTab(url, options = {}) {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!crawlJob.active || tabId !== crawlJob.tabId) return;
-  if (changeInfo.status !== "complete" && changeInfo.url === undefined) return;
-  const url = changeInfo.url || tab?.url || "";
-  if (!isJdBlockedUrl(url)) return;
+  // 仅在 URL 实际变为验证/首页时触发，避免 complete 事件误判导致任务假死
+  const url = changeInfo.url;
+  if (!url || !isJdBlockedUrl(url)) return;
 
-  crawlJobPause();
+  appendCrawlLog("search_tab_risk", url);
+  crawlJobPause("risk");
   chrome.tabs
     .sendMessage(tabId, {
       type: "CRAWL_BLOCKED_BY_RISK",
@@ -525,7 +801,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "CRAWL_JOB_END") {
     crawlJobEnd();
-    if (message.clearCheckpoint !== false) {
+    if (message.clearCheckpoint === true) {
       clearCheckpoint().catch(() => {});
     }
     sendResponse({ ok: true, state: getCrawlJobState() });
@@ -533,7 +809,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "CRAWL_JOB_PAUSE") {
-    crawlJobPause();
+    crawlJobPause(message.reason || "user");
     sendResponse({ ok: true, state: getCrawlJobState() });
     return true;
   }
@@ -552,6 +828,38 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "GET_CRAWL_JOB_STATE") {
     sendResponse({ ok: true, state: getCrawlJobState() });
+    return true;
+  }
+
+  if (message?.type === "CRAWL_JOB_PING") {
+    sendResponse({ ok: true, state: getCrawlJobState() });
+    return true;
+  }
+
+  if (message?.type === "APPEND_CRAWL_LOG") {
+    appendCrawlLog(message.event, message.detail)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
+    return true;
+  }
+
+  if (message?.type === "GET_CRAWL_DIAGNOSTICS") {
+    Promise.all([loadCheckpoint(), loadLinkQueue(), loadDetailRecords()])
+      .then(([checkpoint, links, details]) =>
+        chrome.storage.local.get(CRAWL_LOG_STORAGE_KEY).then((stored) =>
+          sendResponse({
+            ok: true,
+            state: getCrawlJobState(),
+            checkpoint,
+            linkCount: links.length,
+            detailCount: details.length,
+            log: Array.isArray(stored[CRAWL_LOG_STORAGE_KEY])
+              ? stored[CRAWL_LOG_STORAGE_KEY]
+              : [],
+          })
+        )
+      )
+      .catch((error) => sendResponse({ ok: false, error: String(error.message || error) }));
     return true;
   }
 

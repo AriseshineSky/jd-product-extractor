@@ -7,6 +7,7 @@ const clearDetailBtn = document.getElementById("clear-detail-btn");
 const clearLinksBtn = document.getElementById("clear-links-btn");
 const statusEl = document.getElementById("status");
 const cacheStatusEl = document.getElementById("cache-status");
+const jobStatusEl = document.getElementById("job-status");
 const outputEl = document.getElementById("output");
 const hintEl = document.querySelector(".hint");
 const pageModeEl = document.getElementById("page-mode");
@@ -311,6 +312,62 @@ async function runItemExtract({ download }) {
   }
 }
 
+const JOB_KIND_LABELS = {
+  "deep-crawl": "深度抓取",
+  "batch-detail": "批量详情",
+  "cache-urls": "翻页缓存链接",
+};
+
+async function refreshJobStatus() {
+  if (!jobStatusEl) return;
+  try {
+    const diag = await chrome.runtime.sendMessage({ type: "GET_CRAWL_DIAGNOSTICS" });
+    if (!diag?.ok) {
+      jobStatusEl.hidden = true;
+      return;
+    }
+    const { state, checkpoint: cp, linkCount, detailCount, log } = diag;
+    const show = state?.active || Boolean(cp?.kind);
+    if (!show) {
+      jobStatusEl.hidden = true;
+      return;
+    }
+
+    jobStatusEl.hidden = false;
+    jobStatusEl.classList.remove("running", "paused", "stopped");
+    if (state?.active && !state?.paused) jobStatusEl.classList.add("running");
+    else if (state?.paused) jobStatusEl.classList.add("paused");
+    else jobStatusEl.classList.add("stopped");
+
+    const lines = [];
+    if (state?.active && !state?.paused) lines.push("插件：运行中");
+    else if (state?.paused && state?.pauseReason === "risk") {
+      lines.push("插件：已中断（京东验证）");
+    } else if (state?.paused) lines.push("插件：已暂停");
+    else lines.push("插件：已停止（可续跑）");
+
+    const kind = JOB_KIND_LABELS[state?.kind] || JOB_KIND_LABELS[cp?.kind] || "";
+    if (kind) lines.push(`任务：${kind}`);
+
+    if (cp?.kind === "deep-crawl") {
+      lines.push(
+        `进度：搜索第${cp.pageNum || 1}页 · 第${(cp.cardIndex ?? 0) + 1}个商品 · 详情${cp.stats?.detailOk ?? 0}条`
+      );
+    } else if (cp?.kind === "batch-detail" && Number.isFinite(cp.queueIndex)) {
+      lines.push(`进度：队列 ${cp.queueIndex + 1}/${linkCount ?? "?"} · 详情${detailCount ?? 0}条`);
+    }
+
+    if (cp?.stop_reason && !state?.active) lines.push(`原因：${cp.stop_reason}`);
+
+    const lastLog = log?.length ? log[log.length - 1] : null;
+    if (lastLog?.detail) lines.push(`最近：${lastLog.event} ${lastLog.detail}`.slice(0, 120));
+
+    jobStatusEl.textContent = lines.join(" · ");
+  } catch (_) {
+    jobStatusEl.hidden = true;
+  }
+}
+
 async function refreshCacheStatus() {
   const [details, links] = await Promise.all([
     chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" }),
@@ -318,6 +375,7 @@ async function refreshCacheStatus() {
   ]);
   const detailCount = details?.ok ? details.count : 0;
   const linkCount = links?.ok ? links.count : 0;
+  await refreshJobStatus();
 
   if (cacheStatusEl) {
     cacheStatusEl.textContent =
@@ -579,6 +637,7 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === "CRAWL_JOB_STATE_CHANGED") {
     updateJobControlsUi(message.state);
     syncJobControlsFromBackground();
+    refreshJobStatus();
   }
 });
 

@@ -11,11 +11,15 @@
   const JOB_BTN_IDS = [
     "jd-search-pause-job-btn",
     "jd-search-stop-job-btn",
-    "jd-search-resume-job-btn",
   ];
   const USER_STOPPED = "USER_STOPPED";
   const JD_RISK_BLOCKED = "JD_RISK_BLOCKED";
   const AUTO_RESUME_FLAG = "jd_auto_resume_after_nav";
+  const CRAWL_KIND_LABELS = {
+    "deep-crawl": "深度抓取",
+    "batch-detail": "批量详情",
+    "cache-urls": "翻页缓存链接",
+  };
 
   if (window.JdPageUrl?.detectPageMode(location.href) !== "list") return;
 
@@ -67,11 +71,56 @@
         #jd-search-deep-crawl-multi-btn { background: #047857; }
         #jd-search-pause-job-btn { background: #f59e0b; }
         #jd-search-stop-job-btn { background: #dc2626; }
-        #jd-search-resume-job-btn { background: #0d9488; }
+        #jd-search-resume-job-btn {
+          background: #0d9488;
+          white-space: normal;
+          max-width: min(360px, calc(100vw - 36px));
+          text-align: right;
+          line-height: 1.35;
+        }
+        #jd-search-job-status {
+          position: fixed;
+          right: 18px;
+          bottom: 120px;
+          z-index: 2147483647;
+          max-width: min(400px, calc(100vw - 36px));
+          padding: 10px 12px;
+          border-radius: 10px;
+          font-size: 11px;
+          line-height: 1.5;
+          color: #e5e7eb;
+          background: rgba(15, 23, 42, 0.94);
+          border: 1px solid rgba(148, 163, 184, 0.35);
+          display: none;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+        }
+        #jd-search-job-status[data-visible="1"] { display: block; }
+        #jd-search-job-status[data-running="1"] { border-color: rgba(52, 211, 153, 0.55); }
+        #jd-search-job-status[data-paused="1"] { border-color: rgba(251, 191, 36, 0.65); }
+        #jd-search-job-status[data-stopped="1"] { border-color: rgba(248, 113, 113, 0.55); }
+        #jd-search-job-status .jd-job-line { margin: 0 0 4px; }
+        #jd-search-job-status .jd-job-line:last-child { margin-bottom: 0; }
+        #jd-search-job-status .jd-job-reason { color: #fca5a5; }
+        #jd-search-resume-tooltip {
+          position: fixed;
+          z-index: 2147483648;
+          max-width: 360px;
+          padding: 8px 10px;
+          border-radius: 8px;
+          font-size: 11px;
+          line-height: 1.45;
+          color: #f9fafb;
+          background: rgba(17, 24, 39, 0.96);
+          border: 1px solid rgba(148, 163, 184, 0.4);
+          box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+          pointer-events: auto;
+          display: none;
+        }
+        #jd-search-resume-tooltip[data-visible="1"] { display: block; }
         #jd-search-extractor-toast {
           position: fixed;
           right: 18px;
-          bottom: 280px;
+          bottom: 300px;
           z-index: 2147483647;
           max-width: 380px;
           padding: 10px 12px;
@@ -81,6 +130,8 @@
           color: #fff;
           background: rgba(17, 24, 39, 0.92);
           display: none;
+          pointer-events: auto;
+          cursor: default;
         }
       `;
       document.documentElement.appendChild(style);
@@ -126,6 +177,7 @@
     resumeBtn.type = "button";
     resumeBtn.textContent = "继续未完成任务";
     resumeBtn.addEventListener("click", () => runResumeJob());
+    bindResumeTooltipBehavior(resumeBtn);
     panel.appendChild(resumeBtn);
 
     const pauseBtn = document.createElement("button");
@@ -144,9 +196,15 @@
     stopBtn.addEventListener("click", () => stopCrawlJob());
     panel.appendChild(stopBtn);
 
+    const statusHud = document.createElement("div");
+    statusHud.id = "jd-search-job-status";
+    statusHud.setAttribute("aria-live", "polite");
+    document.documentElement.appendChild(statusHud);
+
     document.documentElement.appendChild(panel);
     syncJobControlsFromBackground();
     refreshResumeButton();
+    updateJobStatusHud();
     tryAutoResumeAfterNav();
   }
 
@@ -168,13 +226,136 @@
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function isTransientRuntimeError(err) {
+    const msg = String(err?.message || err);
+    return /establish connection|receiving end|context invalidated|message port closed/i.test(
+      msg
+    );
+  }
+
+  /** 后台 service worker 休眠时重试，减少「抓几条就停」 */
+  async function sendRuntimeMessage(payload, { retries = 4, delayMs = 500 } = {}) {
+    let lastErr;
+    for (let attempt = 0; attempt < retries; attempt++) {
+      try {
+        return await chrome.runtime.sendMessage(payload);
+      } catch (err) {
+        lastErr = err;
+        if (!isTransientRuntimeError(err) || attempt >= retries - 1) throw err;
+        await sleep(delayMs * (attempt + 1));
+      }
+    }
+    throw lastErr;
+  }
+
   async function getCrawlJobState() {
     try {
-      const res = await chrome.runtime.sendMessage({ type: "GET_CRAWL_JOB_STATE" });
-      return res?.state || { active: false, paused: false, stopped: false };
+      const res = await sendRuntimeMessage({ type: "GET_CRAWL_JOB_STATE" }, { retries: 2 });
+      return (
+        res?.state || {
+          active: false,
+          paused: false,
+          pauseReason: null,
+          stopped: false,
+        }
+      );
     } catch (_) {
-      return { active: false, paused: false, stopped: false };
+      return { active: false, paused: false, pauseReason: null, stopped: false };
     }
+  }
+
+  function setLiveProgress(label) {
+    window.__jdCrawlLiveProgress = {
+      label: String(label || ""),
+      at: Date.now(),
+    };
+  }
+
+  async function recordCrawlStatus(patch) {
+    try {
+      await sendRuntimeMessage({ type: "MERGE_CRAWL_CHECKPOINT", patch });
+    } catch (_) {
+      /* ignore */
+    }
+    const detail = patch?.stop_reason || patch?.last_status;
+    if (detail) {
+      sendRuntimeMessage({
+        type: "APPEND_CRAWL_LOG",
+        event: "status",
+        detail: String(detail),
+      }).catch(() => {});
+    }
+    updateJobStatusHud();
+  }
+
+  function formatJobStateLine(state) {
+    if (!state?.active) {
+      if (state?.stopped) return "状态：正在结束…";
+      return "状态：未运行";
+    }
+    if (state.paused && state.pauseReason === "risk") {
+      return "状态：已中断（京东验证/首页）— 请验证后点「继续未完成任务」";
+    }
+    if (state.paused) return "状态：已暂停 — 点「继续」恢复";
+    return "状态：运行中";
+  }
+
+  async function updateJobStatusHud() {
+    const hud = document.getElementById("jd-search-job-status");
+    if (!hud) return;
+
+    const [state, cp] = await Promise.all([getCrawlJobState(), loadCheckpoint()]);
+    const show = state.active || Boolean(cp?.kind);
+    if (!show) {
+      hud.dataset.visible = "0";
+      hud.textContent = "";
+      return;
+    }
+
+    hud.dataset.visible = "1";
+    hud.dataset.running = state.active && !state.paused ? "1" : "0";
+    hud.dataset.paused = state.paused ? "1" : "0";
+    hud.dataset.stopped = !state.active && cp?.kind ? "1" : "0";
+
+    const lines = [];
+    lines.push(formatJobStateLine(state));
+    const kind =
+      CRAWL_KIND_LABELS[state.kind] || CRAWL_KIND_LABELS[cp?.kind] || state.kind || cp?.kind;
+    if (kind) lines.push(`任务：${kind}`);
+
+    if (cp?.kind === "deep-crawl") {
+      const page = cp.pageNum || 1;
+      const card = Number.isFinite(cp.cardIndex) ? cp.cardIndex + 1 : "?";
+      const ok = cp.stats?.detailOk ?? 0;
+      const fail = cp.stats?.detailFail ?? 0;
+      lines.push(`进度：搜索第${page}页 · 待处理第${card}个 · 详情成功${ok} 失败${fail}`);
+    } else if (cp?.kind === "batch-detail" && Number.isFinite(cp.queueIndex)) {
+      const linkCount = await getLinkQueueCount();
+      const pos = cp.queueIndex + 1;
+      lines.push(
+        linkCount != null
+          ? `进度：队列 ${pos}/${linkCount} · 成功${cp.stats?.ok ?? 0} 失败${cp.stats?.fail ?? 0}`
+          : `进度：队列第 ${pos} 条`
+      );
+    }
+
+    const live = window.__jdCrawlLiveProgress;
+    if (live?.label) lines.push(`当前：${live.label}`);
+
+    if (cp?.last_status && state.active) lines.push(`步骤：${cp.last_status}`);
+    if (cp?.stop_reason && !state.active) {
+      lines.push(`停止原因：${cp.stop_reason}`);
+    }
+
+    hud.innerHTML = lines
+      .map((line, i) => {
+        const cls =
+          i === lines.length - 1 && line.startsWith("停止原因：")
+            ? "jd-job-line jd-job-reason"
+            : "jd-job-line";
+        return `<p class="${cls}">${line.replace(/</g, "&lt;")}</p>`;
+      })
+      .join("");
   }
 
   const UNLOAD_GUARD_MESSAGE =
@@ -212,18 +393,30 @@
     setAllButtonsDisabled(state.active);
     setJobControlsEnabled(state.active);
     const pauseBtn = document.getElementById("jd-search-pause-job-btn");
-    if (pauseBtn) pauseBtn.textContent = state.paused ? "继续" : "暂停";
+    if (pauseBtn) {
+      if (state.paused && state.pauseReason === "risk") {
+        pauseBtn.textContent = "继续";
+        pauseBtn.disabled = true;
+      } else {
+        pauseBtn.textContent = state.paused ? "继续" : "暂停";
+        pauseBtn.disabled = !state.active;
+      }
+    }
     await syncUnloadGuard();
+    await refreshResumeButton();
+    updateJobStatusHud();
   }
 
   async function togglePauseJob() {
     const state = await getCrawlJobState();
     if (!state.active) return;
     if (state.paused) {
-      await chrome.runtime.sendMessage({ type: "CRAWL_JOB_RESUME" });
+      await sendRuntimeMessage({ type: "CRAWL_JOB_RESUME" });
+      setLiveProgress("用户已继续任务");
       showToast("已继续：滚屏与抓取将恢复");
     } else {
-      await chrome.runtime.sendMessage({ type: "CRAWL_JOB_PAUSE" });
+      await sendRuntimeMessage({ type: "CRAWL_JOB_PAUSE", reason: "user" });
+      setLiveProgress("用户已暂停任务");
       showToast("已暂停：滚屏与抓取均已暂停，点「继续」恢复");
     }
     await syncJobControlsFromBackground();
@@ -249,7 +442,7 @@
       showToast("当前没有运行中的任务");
       return;
     }
-    await chrome.runtime.sendMessage({ type: "CRAWL_JOB_STOP" });
+    await sendRuntimeMessage({ type: "CRAWL_JOB_STOP" });
     showToast("正在结束任务…");
     const ended = await waitForCrawlJobInactive();
     if (ended) {
@@ -271,19 +464,36 @@
     let state = await getCrawlJobState();
     if (state.stopped || !state.active) throw userStoppedError();
 
+    if (state.paused && state.pauseReason === "risk") {
+      await recordCrawlStatus({
+        stop_reason: "京东验证或跳转首页（自动检测）",
+        last_status: "等待用户完成验证",
+      });
+      const err = new Error("京东验证中断");
+      err.code = JD_RISK_BLOCKED;
+      throw err;
+    }
+
     while (state.paused && !state.stopped) {
+      setLiveProgress("任务已暂停，等待点「继续」");
+      updateJobStatusHud();
       const pauseBtn = document.getElementById("jd-search-pause-job-btn");
       if (pauseBtn) pauseBtn.textContent = "继续";
       await sleep(400);
       state = await getCrawlJobState();
       if (state.stopped || !state.active) throw userStoppedError();
+      if (state.paused && state.pauseReason === "risk") {
+        const err = new Error("京东验证中断");
+        err.code = JD_RISK_BLOCKED;
+        throw err;
+      }
     }
 
     state = await getCrawlJobState();
     if (state.stopped || !state.active) throw userStoppedError();
 
     const pauseBtn = document.getElementById("jd-search-pause-job-btn");
-    if (pauseBtn) pauseBtn.textContent = "暂停";
+    if (pauseBtn && state.active) pauseBtn.textContent = "暂停";
   }
 
   async function interruptedDelay(ms) {
@@ -299,27 +509,65 @@
 
   async function withCrawlJob(kind, runner) {
     const tabId = await getThisTabId();
-    await chrome.runtime.sendMessage({ type: "CRAWL_JOB_START", kind, tabId });
+    setLiveProgress("任务启动…");
+    await sendRuntimeMessage({ type: "CRAWL_JOB_START", kind, tabId });
     setAllButtonsDisabled(true);
     setJobControlsEnabled(true);
     setUnloadGuard(true);
-    let clearCheckpoint = true;
+    updateJobStatusHud();
+
+    const pingTimer = setInterval(() => {
+      sendRuntimeMessage({ type: "CRAWL_JOB_PING" }).catch(() => {});
+      updateJobStatusHud();
+    }, 15000);
+
+    let clearCheckpoint = false;
     try {
-      return await runner();
+      await recordCrawlStatus({ last_status: "任务已开始", stop_reason: "" });
+      const result = await runner();
+      if (result?.jobCompleted === true) clearCheckpoint = true;
+      return result;
     } catch (error) {
-      if (isRiskBlocked(error)) clearCheckpoint = false;
+      if (isRiskBlocked(error)) {
+        clearCheckpoint = false;
+      } else if (isUserStopped(error)) {
+        clearCheckpoint = false;
+        await recordCrawlStatus({
+          stop_reason: "用户点击结束",
+          last_status: "任务已结束",
+        });
+      } else if (isTransientRuntimeError(error)) {
+        clearCheckpoint = false;
+        await recordCrawlStatus({
+          stop_reason: `插件通信中断: ${error.message || error}（可点继续未完成任务）`,
+          last_status: "后台连接失败",
+        });
+      } else {
+        clearCheckpoint = false;
+        await recordCrawlStatus({
+          stop_reason: String(error?.message || error),
+          last_status: "任务异常退出",
+        });
+      }
       throw error;
     } finally {
-      await chrome.runtime.sendMessage({
-        type: "CRAWL_JOB_END",
-        clearCheckpoint,
-      });
+      clearInterval(pingTimer);
+      window.__jdCrawlLiveProgress = null;
+      try {
+        await sendRuntimeMessage({
+          type: "CRAWL_JOB_END",
+          clearCheckpoint,
+        });
+      } catch (_) {
+        /* service worker may be asleep; job state will expire */
+      }
       setAllButtonsDisabled(false);
       setJobControlsEnabled(false);
       const pauseBtn = document.getElementById("jd-search-pause-job-btn");
       if (pauseBtn) pauseBtn.textContent = "暂停";
       await syncUnloadGuard();
       await refreshResumeButton();
+      updateJobStatusHud();
     }
   }
 
@@ -330,36 +578,95 @@
   function isRiskBlocked(error) {
     return (
       error?.code === JD_RISK_BLOCKED ||
-      /验证|登录|首页|JD_RISK/.test(String(error?.message || error?.error || ""))
+      /验证|登录|首页|JD_RISK|页面不可用|空白|休眠|未加载/.test(
+        String(error?.message || error?.error || "")
+      )
     );
   }
 
   async function loadCheckpoint() {
     try {
-      const res = await chrome.runtime.sendMessage({ type: "GET_CRAWL_CHECKPOINT" });
+      const res = await sendRuntimeMessage(
+        { type: "GET_CRAWL_CHECKPOINT" },
+        { retries: 3 }
+      );
+      if (res?.ok === false) return null;
       return res?.checkpoint || null;
-    } catch (_) {
+    } catch (err) {
+      console.warn("loadCheckpoint failed:", err);
       return null;
     }
   }
 
   async function mergeCheckpoint(patch) {
-    await chrome.runtime.sendMessage({ type: "MERGE_CRAWL_CHECKPOINT", patch });
+    await sendRuntimeMessage({ type: "MERGE_CRAWL_CHECKPOINT", patch });
+  }
+
+  async function getLinkQueueCount() {
+    try {
+      const queue = await chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" });
+      return queue?.ok && Number.isFinite(queue.count) ? queue.count : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /** 续跑按钮文案：深度抓取按搜索页商品位点；批量详情按链接队列下标。 */
+  async function formatResumeButtonLabel(cp) {
+    const kindLabel = CRAWL_KIND_LABELS[cp.kind] || cp.kind;
+    const parts = [kindLabel];
+
+    if (cp.kind === "deep-crawl") {
+      if (cp.pageNum) parts.push(`搜索第${cp.pageNum}页`);
+      if (Number.isFinite(cp.cardIndex)) {
+        parts.push(`待处理第${cp.cardIndex + 1}个商品`);
+      }
+      const detailOk = cp.stats?.detailOk;
+      if (Number.isFinite(detailOk) && detailOk > 0) {
+        parts.push(`已提${detailOk}条详情`);
+      }
+      const linkCount = await getLinkQueueCount();
+      if (linkCount > 0) parts.push(`链接缓存${linkCount}条`);
+    } else if (cp.kind === "batch-detail") {
+      const linkCount = await getLinkQueueCount();
+      if (Number.isFinite(cp.queueIndex)) {
+        const pos = cp.queueIndex + 1;
+        parts.push(
+          linkCount != null ? `队列第${pos}/${linkCount}条` : `队列第${pos}条`
+        );
+      }
+    } else {
+      if (cp.pageNum) parts.push(`第${cp.pageNum}页`);
+      if (Number.isFinite(cp.cardIndex)) parts.push(`第${cp.cardIndex + 1}个`);
+      if (Number.isFinite(cp.queueIndex)) parts.push(`队列第${cp.queueIndex + 1}条`);
+    }
+
+    return `继续未完成任务（${parts.join("·")}）`;
   }
 
   async function refreshResumeButton() {
     const btn = document.getElementById("jd-search-resume-job-btn");
     if (!btn) return;
-    const cp = await loadCheckpoint();
+    const [cp, state] = await Promise.all([loadCheckpoint(), getCrawlJobState()]);
     const hasJob = Boolean(cp?.kind);
     btn.style.display = hasJob ? "inline-block" : "none";
+    // 续跑仅在「有进度且当前无运行中任务」时可点；与暂停/结束按钮逻辑分开
+    btn.disabled = !hasJob || state.active;
+    btn.removeAttribute("title");
     if (hasJob) {
-      const page = cp.pageNum ? `第${cp.pageNum}页` : "";
-      const idx = Number.isFinite(cp.cardIndex) ? `第${cp.cardIndex + 1}个` : "";
-      const q = Number.isFinite(cp.queueIndex) ? `队列第${cp.queueIndex + 1}条` : "";
-      btn.textContent = `继续未完成任务（${cp.kind}${page}${idx}${q}）`;
+      btn.textContent = await formatResumeButtonLabel(cp);
+      if (cp.kind === "deep-crawl") {
+        btn.dataset.tooltipText =
+          "续跑按搜索结果页位置继续（第几页、第几个商品），不是按链接缓存条数。链接缓存会在每页开始时批量写入。";
+      } else if (cp.kind === "batch-detail") {
+        btn.dataset.tooltipText = "续跑按链接缓存队列的下标继续逐条打开详情。";
+      } else {
+        btn.dataset.tooltipText = "";
+      }
     } else {
       btn.textContent = "继续未完成任务";
+      btn.dataset.tooltipText = "";
+      hideResumeTooltip();
     }
   }
 
@@ -373,15 +680,22 @@
   }
 
   async function handleRiskBlocked(state) {
+    const reason =
+      window.JdRisk?.blockedReason?.(location.href, document.title) ||
+      "京东验证或跳转首页";
     await mergeCheckpoint({
       ...state,
       searchUrl: state.searchUrl || location.href,
       paused_reason: "risk",
+      stop_reason: reason,
+      last_status: "因京东验证中断",
     });
-    await chrome.runtime.sendMessage({ type: "CRAWL_JOB_PAUSE" });
+    await sendRuntimeMessage({ type: "CRAWL_JOB_PAUSE", reason: "risk" });
     await refreshResumeButton();
+    updateJobStatusHud();
     showToast(
-      "遇到京东验证或跳转首页，进度已保存。请完成验证后回到搜索页，点「继续未完成任务」"
+      `遇到${reason}，进度已保存。请完成验证后回到搜索页，点「继续未完成任务」`,
+      true
     );
     const err = new Error("京东验证中断");
     err.code = JD_RISK_BLOCKED;
@@ -455,9 +769,19 @@
   }
 
   async function runResumeJob(options = {}) {
-    const cp = await loadCheckpoint();
+    let cp;
+    try {
+      cp = await loadCheckpoint();
+    } catch (_) {
+      cp = null;
+    }
     if (!cp?.kind) {
-      showToast("没有可继续的任务", true);
+      showToast(
+        "没有可继续的任务。若刚重载过扩展，请刷新搜索页后再试；进度可能已丢失，可从当前页重新开始深度抓取",
+        true
+      );
+      await refreshResumeButton();
+      updateJobStatusHud();
       return;
     }
 
@@ -534,20 +858,77 @@
     }
   }
 
+  function hideSearchToast() {
+    const toast = document.getElementById("jd-search-extractor-toast");
+    if (toast) toast.style.display = "none";
+    clearTimeout(showToast._timer);
+    showToast._timer = null;
+  }
+
+  function bindSearchToastBehavior(toast) {
+    if (toast.dataset.leaveBound) return;
+    toast.dataset.leaveBound = "1";
+    toast.addEventListener("mouseenter", () => {
+      clearTimeout(showToast._timer);
+      showToast._timer = null;
+    });
+    toast.addEventListener("mouseleave", hideSearchToast);
+  }
+
   function showToast(text, isError = false) {
     let toast = document.getElementById("jd-search-extractor-toast");
     if (!toast) {
       toast = document.createElement("div");
       toast.id = "jd-search-extractor-toast";
       document.documentElement.appendChild(toast);
+      bindSearchToastBehavior(toast);
     }
     toast.style.display = "block";
     toast.style.background = isError ? "rgba(185, 28, 28, 0.95)" : "rgba(17, 24, 39, 0.92)";
     toast.textContent = text;
     clearTimeout(showToast._timer);
-    showToast._timer = setTimeout(() => {
-      toast.style.display = "none";
-    }, 8000);
+    if (!toast.matches(":hover")) {
+      showToast._timer = setTimeout(hideSearchToast, 8000);
+    }
+  }
+
+  function hideResumeTooltip() {
+    const tip = document.getElementById("jd-search-resume-tooltip");
+    if (tip) tip.dataset.visible = "0";
+  }
+
+  function showResumeTooltip(anchor, text) {
+    let tip = document.getElementById("jd-search-resume-tooltip");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.id = "jd-search-resume-tooltip";
+      tip.setAttribute("role", "tooltip");
+      document.documentElement.appendChild(tip);
+      tip.addEventListener("mouseleave", hideResumeTooltip);
+      document.addEventListener(
+        "scroll",
+        hideResumeTooltip,
+        true
+      );
+    }
+    tip.textContent = text;
+    const rect = anchor.getBoundingClientRect();
+    tip.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+    tip.style.bottom = `${Math.max(8, window.innerHeight - rect.top + 6)}px`;
+    tip.style.left = "auto";
+    tip.style.top = "auto";
+    tip.dataset.visible = "1";
+  }
+
+  function bindResumeTooltipBehavior(btn) {
+    if (btn.dataset.tooltipBound) return;
+    btn.dataset.tooltipBound = "1";
+    btn.addEventListener("mouseenter", () => {
+      const text = btn.dataset.tooltipText;
+      if (text) showResumeTooltip(btn, text);
+    });
+    btn.addEventListener("mouseleave", hideResumeTooltip);
+    btn.addEventListener("click", hideResumeTooltip);
   }
 
   async function runCacheUrls() {
@@ -580,6 +961,7 @@
         showToast(
           `已缓存 ${result.count} 个链接${pageInfo}，链接缓存共 ${saved.count} 条。可点「批量详情提取」`
         );
+        return { jobCompleted: true };
       });
     } catch (error) {
       if (isUserStopped(error)) {
@@ -688,6 +1070,9 @@
               link?.textContent?.trim()?.slice(0, 40) ||
               sku;
 
+            const progressLabel = `第${pageNum}页 ${i + 1}/${cards.length}：${label}`;
+            setLiveProgress(progressLabel);
+            await recordCrawlStatus({ last_status: `正在提取 ${progressLabel}` });
             showToast(`第${pageNum}页 ${i + 1}/${cards.length}：提取详情「${label}」…`);
 
             await mergeCheckpoint({
@@ -714,13 +1099,15 @@
 
             let result;
             try {
-              result = await chrome.runtime.sendMessage({
+              result = await sendRuntimeMessage({
                 type: "EXTRACT_URL_IN_NEW_TAB",
                 url,
                 options: {
                   afterLoadMs: 2800,
                   activateTab: true,
                   returnToTabId: searchTabId,
+                  tabTimeoutMs: 90000,
+                  maxAttempts: 2,
                   extract: { scroll: true },
                 },
               });
@@ -761,7 +1148,12 @@
               throw userStoppedError();
             } else {
               stats.detailFail += 1;
-              console.warn("Detail extract failed:", url, result?.error);
+              const errMsg = result?.error || "未知错误";
+              console.warn("Detail extract failed:", url, errMsg);
+              showToast(
+                `第${pageNum}页第${i + 1}个提取失败：${errMsg}，已跳过继续`,
+                true
+              );
             }
 
             if (searchTabId) {
@@ -825,10 +1217,16 @@
           `深度抓取完成：${stats.pages} 页，详情成功 ${stats.detailOk}、失败 ${stats.detailFail}，详情缓存 ${cache?.count ?? "?"} 条` +
             (downloadAtEnd ? "，已下载详情 JSONL" : "")
         );
+        return { jobCompleted: true };
       });
     } catch (error) {
       if (isRiskBlocked(error)) {
+        showToast(
+          `${error?.message || "页面异常"}。进度已保存，验证/刷新搜索页后可点「继续未完成任务」`,
+          true
+        );
         await refreshResumeButton();
+        updateJobStatusHud();
         return;
       }
       if (isUserStopped(error)) {
@@ -884,6 +1282,9 @@
 
           const entry = queue.urls[i];
           const label = entry.title || entry.sku || entry.url;
+          const progressLabel = `队列 ${i + 1}/${queue.count}：${String(label).slice(0, 28)}`;
+          setLiveProgress(progressLabel);
+          await recordCrawlStatus({ last_status: `正在提取 ${progressLabel}` });
           showToast(`详情 ${i + 1}/${queue.count}：提取 ${String(label).slice(0, 28)}…`);
 
           await mergeCheckpoint({
@@ -894,15 +1295,31 @@
             stats: { ok, fail },
           });
 
-          const result = await chrome.runtime.sendMessage({
-            type: "EXTRACT_URL_IN_NEW_TAB",
-            url: entry.url,
-            options: {
-              afterLoadMs: 2500,
-              activateTab: true,
-              extract: { scroll: true },
-            },
-          });
+          let result;
+          try {
+            result = await sendRuntimeMessage({
+              type: "EXTRACT_URL_IN_NEW_TAB",
+              url: entry.url,
+              options: {
+                afterLoadMs: 2500,
+                activateTab: true,
+                tabTimeoutMs: 90000,
+                maxAttempts: 2,
+                extract: { scroll: true },
+              },
+            });
+          } catch (err) {
+            if (isRiskBlocked(err)) {
+              await handleRiskBlocked({
+                kind: "batch-detail",
+                searchUrl,
+                delayMs,
+                queueIndex: i,
+                stats: { ok, fail },
+              });
+            }
+            throw err;
+          }
 
           if (result?.ok) {
             ok += 1;
@@ -918,7 +1335,9 @@
             throw userStoppedError();
           } else {
             fail += 1;
-            console.warn("Detail extract failed:", entry.url, result?.error);
+            const errMsg = result?.error || "未知错误";
+            console.warn("Detail extract failed:", entry.url, errMsg);
+            showToast(`队列第${i + 1}条提取失败：${errMsg}，已跳过继续`, true);
           }
 
           await mergeCheckpoint({
@@ -948,6 +1367,7 @@
           `批量详情提取完成：成功 ${ok}，失败 ${fail}，详情缓存 ${detailCount} 条` +
             (ok > 0 ? "，已下载详情 JSONL" : "")
         );
+        return { jobCompleted: true };
       });
     } catch (error) {
       if (isRiskBlocked(error)) {
@@ -967,19 +1387,82 @@
     }
   }
 
+  if (!window.__jdSearchTabVisibilityListener) {
+    window.__jdSearchTabVisibilityListener = true;
+    let hiddenSince = 0;
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        hiddenSince = Date.now();
+        return;
+      }
+      const hiddenMs = hiddenSince ? Date.now() - hiddenSince : 0;
+      hiddenSince = 0;
+      if (hiddenMs < 3 * 60 * 1000) return;
+
+      (async () => {
+        const state = await getCrawlJobState();
+        const cp = await loadCheckpoint();
+        const mins = Math.max(1, Math.round(hiddenMs / 60000));
+        if (state.active) {
+          await recordCrawlStatus({
+            last_status: `标签页后台约 ${mins} 分钟（可能曾休眠）`,
+          });
+          if (window.JdRisk?.isBlockedContext(location.href, document.title)) {
+            showToast(
+              `${window.JdRisk.blockedReason(location.href, document.title)}。请刷新搜索页后点「继续未完成任务」`,
+              true
+            );
+          }
+          return;
+        }
+        if (cp?.kind) {
+          showToast(
+            `标签页已恢复（后台约 ${mins} 分钟）。任务已停止：${cp.stop_reason || "见状态面板"}。可点「继续未完成任务」`,
+            true
+          );
+          updateJobStatusHud();
+        }
+      })();
+    });
+  }
+
   if (!window.__jdSearchCrawlJobStateListener) {
     window.__jdSearchCrawlJobStateListener = true;
     chrome.runtime.onMessage.addListener((message) => {
       if (message?.type === "CRAWL_JOB_STATE_CHANGED") {
         syncJobControlsFromBackground();
         refreshResumeButton();
+        updateJobStatusHud();
       }
       if (message?.type === "CRAWL_BLOCKED_BY_RISK") {
-        refreshResumeButton();
-        showToast(
-          "搜索页被重定向到验证/首页，进度已保存。请完成验证后点「继续未完成任务」",
-          true
-        );
+        (async () => {
+          const cp = await loadCheckpoint();
+          const reason =
+            message.reason === "home"
+              ? "搜索页跳转到京东首页"
+              : "搜索页跳转到验证/登录页";
+          if (cp?.kind) {
+            await mergeCheckpoint({
+              ...cp,
+              paused_reason: "risk",
+              stop_reason: reason,
+              last_status: "搜索页 URL 异常",
+            });
+          } else {
+            await mergeCheckpoint({
+              paused_reason: "risk",
+              stop_reason: reason,
+              searchUrl: location.href,
+              last_status: "搜索页 URL 异常",
+            });
+          }
+          await refreshResumeButton();
+          updateJobStatusHud();
+          showToast(
+            `${reason}，任务已保存进度。请完成验证后点「继续未完成任务」`,
+            true
+          );
+        })();
       }
     });
   }

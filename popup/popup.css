@@ -198,6 +198,32 @@ button {
   color: #4b5563;
 }
 
+.job-status {
+  margin: 0 16px 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #1e293b;
+  background: #f1f5f9;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+}
+
+.job-status.running {
+  border-color: #6ee7b7;
+  background: #ecfdf5;
+}
+
+.job-status.paused {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.job-status.stopped {
+  border-color: #fca5a5;
+  background: #fef2f2;
+}
+
 .status {
   margin: 0 16px 8px;
   font-size: 12px;

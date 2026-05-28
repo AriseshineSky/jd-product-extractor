@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JD Product Extractor",
-  "version": "1.2.4",
+  "version": "1.2.7",
   "description": "Extract JD item and search page product data into StandardProduct-compatible JSON.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
@@ -11,6 +11,7 @@
     "https://item.jkcsjd.com/*",
     "https://item.yiyaojd.com/*",
     "https://item.jingxi.com/*",
+    "https://*.jd.com/*",
     "https://api.m.jd.com/*",
     "https://club.jd.com/*",
     "https://www.jd.com/*",
