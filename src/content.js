@@ -55,6 +55,45 @@
           display: none;
           pointer-events: auto;
         }
+        #jd-product-extractor-desc-dialog {
+          position: fixed;
+          inset: 0;
+          z-index: 2147483647;
+          display: none;
+          align-items: center;
+          justify-content: center;
+          background: rgba(15, 23, 42, 0.45);
+        }
+        #jd-product-extractor-desc-dialog .jd-desc-dialog-panel {
+          max-width: 360px;
+          margin: 16px;
+          padding: 18px 20px;
+          border-radius: 12px;
+          background: #fff;
+          color: #111827;
+          box-shadow: 0 18px 40px rgba(15, 23, 42, 0.22);
+        }
+        #jd-product-extractor-desc-dialog h3 {
+          margin: 0 0 10px;
+          font-size: 15px;
+          line-height: 1.4;
+        }
+        #jd-product-extractor-desc-dialog p {
+          margin: 0 0 16px;
+          font-size: 13px;
+          line-height: 1.6;
+          color: #4b5563;
+        }
+        #jd-product-extractor-desc-dialog button {
+          border: none;
+          border-radius: 8px;
+          padding: 8px 14px;
+          font-size: 13px;
+          font-weight: 600;
+          color: #fff;
+          background: #2563eb;
+          cursor: pointer;
+        }
       `;
       document.documentElement.appendChild(style);
     }
@@ -102,6 +141,41 @@
     toast.addEventListener("mouseleave", hideItemToast);
   }
 
+  const DESCRIPTION_REQUIRED_MESSAGE =
+    "商品描述尚未加载。请先向下滚动页面，等待图文详情加载完成后再点击提取。";
+
+  function showDescriptionRequiredDialog() {
+    let dialog = document.getElementById("jd-product-extractor-desc-dialog");
+    if (!dialog) {
+      dialog = document.createElement("div");
+      dialog.id = "jd-product-extractor-desc-dialog";
+      dialog.innerHTML = `
+        <div class="jd-desc-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="jd-desc-dialog-title">
+          <h3 id="jd-desc-dialog-title">请先加载商品描述</h3>
+          <p>${DESCRIPTION_REQUIRED_MESSAGE}</p>
+          <button type="button">我知道了</button>
+        </div>
+      `;
+      const close = () => {
+        dialog.style.display = "none";
+      };
+      dialog.addEventListener("click", (event) => {
+        if (event.target === dialog) close();
+      });
+      dialog.querySelector("button")?.addEventListener("click", close);
+      document.documentElement.appendChild(dialog);
+    }
+    dialog.style.display = "flex";
+  }
+
+  function ensurePageDescriptionLoaded() {
+    if (window.JdProductExtractor?.hasPageDescriptionLoaded?.()) return;
+    showDescriptionRequiredDialog();
+    const error = new Error(DESCRIPTION_REQUIRED_MESSAGE);
+    error.code = "DESCRIPTION_NOT_LOADED";
+    throw error;
+  }
+
   function showToast(text, isError = false) {
     let toast = document.getElementById("jd-product-extractor-toast");
     if (!toast) {
@@ -132,11 +206,11 @@
 
   async function runExtract(_button, { download = false } = {}) {
     setPanelDisabled(true);
-    showToast(download ? "正在滚动并提取，完成后下载 JSONL…" : "正在滚动并提取商品信息…");
+    showToast(download ? "正在提取并下载 JSONL…" : "正在提取商品信息…");
 
     try {
-      await humanScrollBeforeExtract();
-      showToast("滚动完成，正在解析商品数据…");
+      ensurePageDescriptionLoaded();
+      showToast("正在解析商品数据…");
 
       const data = await JdProductExtractor.extractJdProduct();
       const { _validation_errors, ...product } = data;
@@ -164,7 +238,9 @@
         showToast(`已提取并写入缓存（共 ${saved.count} 条）${validationHint}`);
       }
     } catch (error) {
-      showToast(String(error.message || error), true);
+      if (error?.code !== "DESCRIPTION_NOT_LOADED") {
+        showToast(String(error.message || error), true);
+      }
     } finally {
       setPanelDisabled(false);
     }
@@ -177,10 +253,12 @@
       }
 
       const opts = message.options || {};
-      const needScroll = opts.scroll !== false;
+      const needScroll = opts.scroll === true;
 
       if (needScroll) {
         await humanScrollBeforeExtract(opts.scroll || {});
+      } else {
+        ensurePageDescriptionLoaded();
       }
 
       const data = await window.JdProductExtractor.extractJdProduct(opts);

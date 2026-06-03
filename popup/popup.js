@@ -151,7 +151,7 @@ async function extractItemFromTab(tab, { download = false } = {}) {
 
   const payload = {
     type: "EXTRACT_JD_PRODUCT_WITH_SCROLL",
-    options: { scroll: true, save: true, download },
+    options: { scroll: false, save: true, download },
   };
 
   async function sendExtract() {
@@ -255,7 +255,7 @@ function updateUiForTab(tab) {
   if (hintEl) {
     if (isItem) {
       hintEl.textContent =
-        "商品页会先平滑滚屏再提取；「只提取」仅写入详情缓存，不触发下载";
+        "商品页需先手动向下滚动加载图文详情后再提取；「只提取」仅写入详情缓存，不触发下载";
     } else if (isTaobaoList) {
       hintEl.textContent =
         "淘宝/天猫搜索页：「翻页缓存链接」收集商品 URL；「提取搜索列表」写入列表级商品数据";
@@ -333,7 +333,7 @@ async function runItemExtract({ download }) {
     await chrome.tabs.update(tab.id, { active: true });
   }
 
-  setStatus(download ? "正在滚动页面并提取（请看商品页标签）…" : "正在滚动并只写入详情缓存（请看商品页）…");
+  setStatus(download ? "正在提取并下载 JSONL（请看商品页标签）…" : "正在提取并写入详情缓存（请看商品页）…");
 
   const response = await withTimeout(
     extractItemFromTab(tab, { download }),
@@ -341,7 +341,14 @@ async function runItemExtract({ download }) {
     "提取超时：请确认商品页在前台且已加载完成"
   );
 
-  if (!response?.ok) throw new Error(response?.error || "提取失败");
+  if (!response?.ok) {
+    if (response?.code === "DESCRIPTION_NOT_LOADED") {
+      throw new Error(
+        "商品描述尚未加载：请先在商品页面向下滚动，等待图文详情出现后再点击提取"
+      );
+    }
+    throw new Error(response?.error || "提取失败");
+  }
 
   const { data, validationErrors } = stripInternalFields(response.data);
   lastPayload = data;

@@ -572,6 +572,18 @@
     return out;
   }
 
+  function hasPageDescriptionLoaded() {
+    const domDesc = parseDescriptionFromDom();
+    if (domDesc && domDesc.length >= 20) return true;
+
+    if (typeof pageConfig !== "undefined" && pageConfig.product?.desc) {
+      const desc = String(pageConfig.product.desc || "").trim();
+      if (desc) return true;
+    }
+
+    return false;
+  }
+
   function parseDescriptionFromDom() {
     const roots = [];
     const detailMain = document.querySelector("#detail-main");
@@ -889,6 +901,7 @@
 
   const api = {
     extractJdProduct,
+    hasPageDescriptionLoaded,
     validateProductSourceShape,
     tryBuildProductFromDom,
     isNewJdItemPage,
