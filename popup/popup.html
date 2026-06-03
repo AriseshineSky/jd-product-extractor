@@ -13,7 +13,7 @@
       <p class="hint">在 item.jd.com 商品页点击提取，输出详情 JSONL</p>
     </header>
     <p id="unsupported-notice" class="unsupported-notice" hidden>
-      请切换到<strong>商品详情页</strong>（item.jd.com）或<strong>搜索/分类列表页</strong>（search.jd.com、list.jd.com）后再操作。
+      请切换到<strong>商品详情页</strong>（item.jd.com / item.taobao.com / detail.tmall.com）或<strong>搜索/分类列表页</strong>（search.jd.com、list.jd.com、s.taobao.com）后再操作。
     </p>
     <div id="search-options" class="search-options" hidden>
       <label for="search-pages">自动翻页页数（1=仅当前页）</label>
@@ -30,6 +30,7 @@
       <button id="cache-urls-btn" type="button" class="blue">翻页缓存链接</button>
       <button id="batch-detail-btn" type="button" class="purple">批量详情提取</button>
       <button id="deep-crawl-btn" type="button" class="green">逐一点开详情提取</button>
+      <button id="extract-list-btn" type="button" class="green" hidden>提取搜索列表</button>
     </div>
     <div id="job-controls" class="actions job-controls" hidden>
       <button id="pause-job-btn" type="button" class="amber">暂停</button>

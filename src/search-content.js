@@ -195,7 +195,12 @@
     resumeBtn.id = "jd-search-resume-job-btn";
     resumeBtn.type = "button";
     resumeBtn.textContent = "继续未完成任务";
-    resumeBtn.addEventListener("click", () => runResumeJob());
+    resumeBtn.addEventListener("click", () => {
+      runResumeJob().catch((err) => {
+        console.error("[jd-extractor] runResumeJob:", err);
+        showToast(String(err?.message || err), true);
+      });
+    });
     bindResumeTooltipBehavior(resumeBtn);
     panel.appendChild(resumeBtn);
 
@@ -233,11 +238,35 @@
     document.documentElement.appendChild(statusToggle);
 
     document.documentElement.appendChild(panel);
-    syncJobControlsFromBackground();
-    refreshResumeButton();
-    updateJobStatusHud();
-    tryAutoResumeAfterNav();
-    tryResumeAfterVerifyOnLoad();
+    (async () => {
+      await syncJobControlsFromBackground();
+      await healStaleJobOnLoad();
+      await refreshResumeButton();
+      updateJobStatusHud();
+      tryAutoResumeAfterNav();
+      tryResumeAfterVerifyOnLoad();
+    })();
+  }
+
+  /** 页面刷新/扩展重载后，后台仍标记 active 但本页已无运行中的任务循环 */
+  async function healStaleJobOnLoad() {
+    try {
+      const [cp, state] = await Promise.all([loadCheckpoint(), getCrawlJobState()]);
+      if (!cp?.kind || !state.active) return;
+      if (window.__jdCrawlJobRunnerAlive) return;
+      const tabId = await getThisTabId();
+      if (state.tabId != null && tabId != null && state.tabId !== tabId) return;
+
+      await sendRuntimeMessage({ type: "CRAWL_JOB_STOP" });
+      await sendRuntimeMessage({ type: "CRAWL_JOB_END", clearCheckpoint: false });
+      await mergeCheckpoint({
+        last_status: "任务已中断，可点「继续未完成任务」",
+        stop_reason: "页面刷新或扩展重载导致中断",
+      });
+      showToast("检测到上次任务已中断，进度已保留，请点「继续未完成任务」");
+    } catch (err) {
+      console.warn("healStaleJobOnLoad:", err);
+    }
   }
 
   /** 搜索页从验证页跳回后，内容脚本重新注入时恢复任务 */
@@ -663,7 +692,9 @@
   async function withCrawlJob(kind, runner) {
     const tabId = await getThisTabId();
     setLiveProgress("任务启动…");
-    await sendRuntimeMessage({ type: "CRAWL_JOB_START", kind, tabId });
+    const startRes = await sendRuntimeMessage({ type: "CRAWL_JOB_START", kind, tabId });
+    const jobGeneration = startRes?.state?.generation ?? null;
+    window.__jdCrawlJobRunnerAlive = true;
     setAllButtonsDisabled(true);
     setJobControlsEnabled(true);
     setUnloadGuard(true);
@@ -706,10 +737,12 @@
     } finally {
       clearInterval(pingTimer);
       window.__jdCrawlLiveProgress = null;
+      window.__jdCrawlJobRunnerAlive = false;
       try {
         await sendRuntimeMessage({
           type: "CRAWL_JOB_END",
           clearCheckpoint,
+          generation: jobGeneration,
         });
       } catch (_) {
         /* service worker may be asleep; job state will expire */
@@ -800,14 +833,30 @@
   async function refreshResumeButton() {
     const btn = document.getElementById("jd-search-resume-job-btn");
     if (!btn) return;
+    if (btn.dataset.resumeRunning === "1") return;
+
     const [cp, state] = await Promise.all([loadCheckpoint(), getCrawlJobState()]);
     const hasJob = Boolean(cp?.kind);
     btn.style.display = hasJob ? "inline-block" : "none";
-    // 续跑仅在「有进度且当前无运行中任务」时可点；与暂停/结束按钮逻辑分开
-    btn.disabled = !hasJob || state.active;
+
+    const tabId = await getThisTabId();
+    const wrongTab =
+      state.active &&
+      state.tabId != null &&
+      tabId != null &&
+      state.tabId !== tabId;
+    const canResume =
+      hasJob &&
+      (!state.active || state.paused || state.stale || wrongTab || !window.__jdCrawlJobRunnerAlive);
+    btn.disabled = !canResume;
     btn.removeAttribute("title");
     if (hasJob) {
       btn.textContent = await formatResumeButtonLabel(cp);
+      if (!canResume && state.active) {
+        btn.title = "任务运行中，请先点「结束」或等待当前任务完成";
+      } else if (state.paused && state.pauseReason === "risk") {
+        btn.title = "验证暂停后可点此恢复（会重新从 checkpoint 继续）";
+      }
       if (cp.kind === "deep-crawl") {
         btn.dataset.tooltipText =
           "续跑按搜索结果页位置继续（第几页、第几个商品），不是按链接缓存条数。链接缓存会在每页开始时批量写入。";
@@ -839,11 +888,21 @@
     }
   }
 
-  async function extractWithVerifyRetry(url, options, checkpointState) {
+  async function extractWithVerifyRetry(url, options, checkpointState, humanCtx) {
+    if (humanCtx?.card) {
+      return extractDetailViaHumanClick(
+        url,
+        humanCtx.card,
+        humanCtx.link,
+        options,
+        checkpointState
+      );
+    }
+
     let result = await sendRuntimeMessage({
       type: "EXTRACT_URL_IN_NEW_TAB",
       url,
-      options,
+      options: { ...options, openMode: "programmatic" },
     });
     if (isVerifyWait(result) || isRiskBlocked(result)) {
       await handleRiskBlocked(checkpointState);
@@ -851,6 +910,76 @@
         type: "EXTRACT_AFTER_VERIFY",
         url,
         options,
+      });
+    }
+    return result;
+  }
+
+  async function extractDetailViaHumanClick(url, card, link, options, checkpointState) {
+    const searchTabId = options.returnToTabId;
+    const extractOptions = {
+      ...options,
+      searchUrl: options.searchUrl || location.href,
+    };
+    const clickLink = link || JdSearchExtractor.findProductLinkInCard(card);
+
+    async function tryHumanOpenOnce() {
+      const waitPromise = sendRuntimeMessage({
+        type: "WAIT_FOR_HUMAN_ITEM_TAB",
+        url,
+        openerTabId: searchTabId,
+        timeoutMs: options.humanOpenTimeoutMs || 22000,
+      });
+      await sleep(120);
+      await recordCrawlStatus({ last_status: "模拟鼠标点击打开详情（单标签）…" });
+      await JdSearchExtractor.humanPrepareAndClickProduct(card, clickLink, {
+        mode: "new_tab",
+      });
+      const waitResult = await waitPromise;
+      if (!waitResult?.ok) {
+        return waitResult;
+      }
+      return sendRuntimeMessage({
+        type: "EXTRACT_ON_EXISTING_TAB",
+        tabId: waitResult.tabId,
+        url,
+        options: extractOptions,
+      });
+    }
+
+    let result;
+    try {
+      result = await tryHumanOpenOnce();
+    } catch (err) {
+      result = { ok: false, error: String(err?.message || err) };
+    }
+
+    const canFallback =
+      !result?.ok &&
+      !isVerifyWait(result) &&
+      !isRiskBlocked(result) &&
+      result?.code !== "USER_STOPPED";
+    if (canFallback) {
+      await sendRuntimeMessage({
+        type: "CLOSE_ORPHAN_ITEM_TABS",
+        openerTabId: searchTabId,
+        expectedUrl: url,
+        force: true,
+      });
+      showToast("模拟点击未打开详情，改用后台单标签打开…", true);
+      result = await sendRuntimeMessage({
+        type: "EXTRACT_URL_IN_NEW_TAB",
+        url,
+        options: extractOptions,
+      });
+    }
+
+    if (isVerifyWait(result) || isRiskBlocked(result)) {
+      await handleRiskBlocked(checkpointState);
+      result = await sendRuntimeMessage({
+        type: "EXTRACT_AFTER_VERIFY",
+        url,
+        options: extractOptions,
       });
     }
     return result;
@@ -942,53 +1071,81 @@
   }
 
   async function runResumeJob(options = {}) {
-    let cp;
+    const resumeBtn = document.getElementById("jd-search-resume-job-btn");
+    if (resumeBtn?.dataset.resumeRunning === "1") return;
+
     try {
-      cp = await loadCheckpoint();
-    } catch (_) {
-      cp = null;
-    }
-    if (!cp?.kind) {
-      showToast(
-        "没有可继续的任务。若刚重载过扩展，请刷新搜索页后再试；进度可能已丢失，可从当前页重新开始深度抓取",
-        true
-      );
-      await refreshResumeButton();
-      updateJobStatusHud();
-      return;
-    }
+      if (resumeBtn) {
+        resumeBtn.dataset.resumeRunning = "1";
+        resumeBtn.disabled = true;
+      }
+      showToast("正在恢复任务…");
 
-    const jobState = await getCrawlJobState();
-    if (jobState.active) {
-      await sendRuntimeMessage({ type: "CRAWL_JOB_END", clearCheckpoint: false });
-    }
-
-    if (!options.skipNavigation) {
-      const ready = await ensureSearchPageReady(cp.searchUrl);
-      if (!ready) return;
-    } else {
-      const ok = await waitForSearchCards();
-      if (!ok) {
-        showToast("当前页没有商品列表，请打开搜索结果页", true);
+      let cp;
+      try {
+        cp = await loadCheckpoint();
+      } catch (_) {
+        cp = null;
+      }
+      if (!cp?.kind) {
+        showToast(
+          "没有可继续的任务。若刚重载过扩展，请刷新搜索页后再试；进度可能已丢失，可从当前页重新开始深度抓取",
+          true
+        );
         return;
       }
-    }
 
-    if (cp.kind === "deep-crawl") {
-      await runDeepCrawlSearch({
-        multiPage: Boolean(cp.multiPage),
-        downloadAtEnd: Boolean(cp.downloadAtEnd),
-        resume: cp,
-      });
-      return;
-    }
+      const jobState = await getCrawlJobState();
+      if (jobState.active) {
+        await sendRuntimeMessage({ type: "CRAWL_JOB_STOP" });
+        await sleep(500);
+        await sendRuntimeMessage({ type: "CRAWL_JOB_END", clearCheckpoint: false });
+        await sleep(300);
+      }
 
-    if (cp.kind === "batch-detail") {
-      await runBatchDetailExtract({ resume: cp });
-      return;
-    }
+      if (!options.skipNavigation) {
+        let ready = false;
+        try {
+          ready = await ensureSearchPageReady(cp.searchUrl);
+        } catch (err) {
+          if (isRiskBlocked(err)) {
+            showToast(String(err.message || err), true);
+            return;
+          }
+          throw err;
+        }
+        if (!ready) return;
+      } else {
+        const ok = await waitForSearchCards();
+        if (!ok) {
+          showToast("当前页没有商品列表，请打开搜索结果页", true);
+          return;
+        }
+      }
 
-    showToast(`任务类型 ${cp.kind} 暂不支持续跑`, true);
+      if (cp.kind === "deep-crawl") {
+        await runDeepCrawlSearch({
+          multiPage: Boolean(cp.multiPage),
+          downloadAtEnd: Boolean(cp.downloadAtEnd),
+          resume: cp,
+        });
+        return;
+      }
+
+      if (cp.kind === "batch-detail") {
+        await runBatchDetailExtract({ resume: cp });
+        return;
+      }
+
+      showToast(`任务类型 ${cp.kind} 暂不支持续跑`, true);
+    } catch (error) {
+      console.error("[jd-extractor] runResumeJob:", error);
+      showToast(String(error?.message || error), true);
+    } finally {
+      if (resumeBtn) delete resumeBtn.dataset.resumeRunning;
+      await refreshResumeButton();
+      updateJobStatusHud();
+    }
   }
 
   async function cacheSearchCardUrls(cards) {
@@ -1280,15 +1437,6 @@
               cardIndex: i,
             });
 
-            if (link && window.JdHumanMouse?.humanClickOpenInNewTab) {
-              try {
-                await window.JdHumanMouse.humanClickOpenInNewTab(link);
-              } catch (err) {
-                console.warn("humanClickOpenInNewTab:", err);
-              }
-              await interruptedDelay(randDelay(280, 520));
-            }
-
             let result;
             try {
               result = await extractWithVerifyRetry(
@@ -1297,8 +1445,10 @@
                   afterLoadMs: 2800,
                   activateTab: true,
                   returnToTabId: searchTabId,
+                  searchUrl,
                   tabTimeoutMs: 90000,
                   maxAttempts: 2,
+                  humanOpenTimeoutMs: 30000,
                   extract: { scroll: true },
                 },
                 {
@@ -1312,7 +1462,8 @@
                   stats,
                   pageNum,
                   cardIndex: i,
-                }
+                },
+                { card, link }
               );
             } catch (err) {
               if (isRiskBlocked(err)) {
@@ -1473,6 +1624,15 @@
           await recordCrawlStatus({ last_status: `正在提取 ${progressLabel}` });
           showToast(`详情 ${i + 1}/${queue.count}：提取 ${String(label).slice(0, 28)}…`);
 
+          const entrySku = entry.sku || entry.url?.match(/(\d+)\.html/)?.[1];
+          const card =
+            entrySku &&
+            JdSearchExtractor.findSearchCards().find(
+              (c) => c.getAttribute("data-sku") === String(entrySku)
+            );
+          const link = card ? JdSearchExtractor.findProductLinkInCard(card) : null;
+          const searchTabId = (await chrome.tabs.query({ active: true, currentWindow: true }))?.[0]?.id;
+
           await mergeCheckpoint({
             kind: "batch-detail",
             searchUrl,
@@ -1488,8 +1648,11 @@
               {
                 afterLoadMs: 2500,
                 activateTab: true,
+                returnToTabId: searchTabId,
+                searchUrl,
                 tabTimeoutMs: 90000,
                 maxAttempts: 2,
+                humanOpenTimeoutMs: 30000,
                 extract: { scroll: true },
               },
               {
@@ -1498,7 +1661,8 @@
                 delayMs,
                 queueIndex: i,
                 stats: { ok, fail },
-              }
+              },
+              card ? { card, link } : undefined
             );
           } catch (err) {
             if (isRiskBlocked(err)) {

@@ -197,6 +197,27 @@
     return dedupeAndPreferLargeImages(rawUrls, skuId);
   }
 
+  function isSpecificationSkuOutOfStock(item) {
+    if (!item) return false;
+    const title = item.getAttribute("title") || "";
+    if (/无货|下架|商品已下柜|不在该地区销售/.test(title)) return true;
+    if (item.classList.contains("specification-item-sku--lack")) return true;
+    if (item.classList.contains("specification-item-sku--unavailable")) return true;
+    if (item.querySelector(".specification-item-sku--lack-tag")) return true;
+    return false;
+  }
+
+  function isBottomBuyAreaOutOfStock(root) {
+    if (!root) return false;
+    const text = root.textContent || "";
+    if (/无货|下架|商品已下柜|不在该地区销售/.test(text)) return true;
+    if (/到货通知/.test(text) && !/加入购物车|立即购买|马上抢|抢购|领券购买/.test(text)) return true;
+    if (root.querySelector(".disable, .btn-disable, [class*='sold-out'], [class*='no-stock']")) {
+      return true;
+    }
+    return false;
+  }
+
   function parseColorSizeFromDom(mainSkuId) {
     const groups = [...document.querySelectorAll(".specification-group")];
     if (!groups.length) return [];
@@ -217,6 +238,7 @@
             bySku.set(sku, row);
           }
           row[label] = value;
+          row._inStock = !isSpecificationSkuOutOfStock(item);
         }
       });
     });
@@ -232,18 +254,32 @@
       const selected = group.querySelector(".specification-item-sku--selected");
       const value = selected?.querySelector(".specification-item-sku-text")?.textContent?.trim();
       if (value) selectedRow[label] = value;
+      selectedRow._inStock = !isSpecificationSkuOutOfStock(selected);
     });
     return [selectedRow];
   }
 
   function parseExistenceFromDom() {
-    const buyArea = document.querySelector(".bottom-btns-root, .page-right-price, .product-price-panel");
-    if (buyArea) {
-      if (/无货|下架|商品已下柜|不在该地区销售/.test(buyArea.textContent || "")) return false;
-      if (buyArea.querySelector(".disable, .btn-disable, [class*='sold-out'], [class*='no-stock']")) {
+    const selected = document.querySelector(".specification-item-sku--selected");
+    if (isSpecificationSkuOutOfStock(selected)) return false;
+
+    if (isBottomBuyAreaOutOfStock(document.querySelector(".bottom-btns-root"))) return false;
+
+    const legacyBuyArea = document.querySelector("#choose-btns, .btn-wrap, .buyArea");
+    if (legacyBuyArea) {
+      if (/无货|下架|商品已下柜|不在该地区销售|到货通知/.test(legacyBuyArea.textContent || "")) {
+        return false;
+      }
+      if (legacyBuyArea.querySelector(".btn-disable, .disable, #InitCartUrl.disabled")) {
         return false;
       }
     }
+
+    const pricePanel = document.querySelector(".page-right-price, .product-price-panel");
+    if (pricePanel && /无货|下架|商品已下柜|不在该地区销售/.test(pricePanel.textContent || "")) {
+      return false;
+    }
+
     return true;
   }
 
@@ -686,7 +722,7 @@
     const keys = new Set();
     colorSize.forEach((row) => {
       Object.keys(row || {}).forEach((k) => {
-        if (k !== "skuId") keys.add(k);
+        if (k !== "skuId" && !k.startsWith("_")) keys.add(k);
       });
     });
     return [...keys].map((name) => ({ name }));
@@ -699,7 +735,7 @@
       const sku = String(row.skuId || mainSkuId);
       const option_values = [];
       Object.keys(row).forEach((key) => {
-        if (key === "skuId") return;
+        if (key === "skuId" || key.startsWith("_")) return;
         option_values.push({
           option_name: key,
           option_value: String(row[key] ?? ""),
@@ -709,7 +745,7 @@
         sku,
         price,
         currency: "CNY",
-        available_qty: null,
+        available_qty: row._inStock === false ? 0 : null,
         barcode: null,
         variant_id: sku,
         option_values,
@@ -813,7 +849,7 @@
       sku: mainSku,
       price: price ?? 0,
       currency: "CNY",
-      available_qty: product.stockSkuNum ?? null,
+      available_qty: product.warestatus === 1 ? product.stockSkuNum ?? null : 0,
       images,
       product_id: skuId,
       existence: product.warestatus === 1,

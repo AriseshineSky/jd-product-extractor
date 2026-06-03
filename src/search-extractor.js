@@ -47,22 +47,124 @@
     return url;
   }
 
+  function itemUrlFromSku(sku) {
+    return `https://item.jd.com/${sku}.html`;
+  }
+
+  function skuFromProductHref(href) {
+    if (!href) return null;
+    let h = String(href).trim();
+    if (!h || h === "#" || /^javascript:/i.test(h)) return null;
+    if (h.startsWith("//")) h = "https:" + h;
+
+    const direct = h.match(/item\.(jd|jkcsjd|yiyaojd|jingxi)\.com\/(\d+)\.html/i);
+    if (direct) return direct[2];
+
+    const mobile = h.match(/item\.m\.jd\.com\/product\/(\d+)/i);
+    if (mobile) return mobile[1];
+
+    try {
+      const u = new URL(h, "https://search.jd.com/");
+      const fromQuery =
+        u.searchParams.get("sku") ||
+        u.searchParams.get("skuId") ||
+        u.searchParams.get("wareId") ||
+        u.searchParams.get("pid");
+      if (fromQuery && /^\d{6,}$/.test(fromQuery)) return fromQuery;
+      const fromPath = u.pathname.match(/\/(\d{6,})(?:\.html)?(?:\/|$)/);
+      if (fromPath) return fromPath[1];
+    } catch (_) {
+      /* ignore malformed href */
+    }
+    return null;
+  }
+
+  function findBestClickableSubElement(card) {
+    if (!card) return null;
+    const selectors = [
+      '[class*="goodsName"]',
+      '[class*="goods-name"]',
+      '[class*="GoodsName"]',
+      '[class*="_card_"]',
+      '[class*="bannerPic"]',
+      '[class*="picBox"]',
+      '[class*="title"]',
+      ".p-name",
+      ".p-img",
+      "[title]",
+      "img",
+    ];
+    for (const sel of selectors) {
+      const el = card.querySelector(sel);
+      if (el) return el;
+    }
+    return card;
+  }
+
+  function ensureProxyProductAnchor(container, url) {
+    if (!container || !url) return null;
+    let anchor = container.querySelector(':scope > a[data-jd-extractor-proxy="1"]');
+    if (!anchor) {
+      anchor = document.createElement("a");
+      anchor.setAttribute("data-jd-extractor-proxy", "1");
+      anchor.setAttribute("aria-hidden", "true");
+      anchor.tabIndex = -1;
+      anchor.style.cssText =
+        "position:absolute;left:0;top:0;width:100%;height:100%;z-index:9999;opacity:0.01;cursor:pointer;background:transparent;";
+      const pos = getComputedStyle(container).position;
+      if (pos === "static") container.style.position = "relative";
+      container.appendChild(anchor);
+    }
+    anchor.href = url;
+    return anchor;
+  }
+
   function findProductLinkInCard(card) {
     if (!card) return null;
+    const sku = card.getAttribute("data-sku");
+    const itemUrl = sku && /^\d{6,}$/.test(sku) ? itemUrlFromSku(sku) : null;
+
     const selectors = [
       'a[href*="item.jd.com"]',
       'a[href*="item.jkcsjd.com"]',
       'a[href*="item.yiyaojd.com"]',
+      'a[href*="item.jingxi.com"]',
+      'a[href*="item.m.jd.com"]',
       ".p-name a",
       '[class*="goodsName"] a',
       '[class*="title"] a',
-      "a",
+      "a[href]",
     ];
     for (const sel of selectors) {
-      const a = card.querySelector(sel);
-      if (!a?.href) continue;
-      if (/item\.(jd|jkcsjd|yiyaojd|jingxi)\.com\/\d+\.html/i.test(a.href)) return a;
+      for (const a of card.querySelectorAll(sel)) {
+        const raw = a.getAttribute("href") || a.href;
+        const resolvedSku = skuFromProductHref(raw);
+        if (!resolvedSku) continue;
+        const url = itemUrlFromSku(resolvedSku);
+        try {
+          a.href = url;
+        } catch (_) {
+          /* read-only href in some nodes */
+        }
+        return a;
+      }
     }
+
+    for (const el of card.querySelectorAll("[data-href], [data-url], [data-link]")) {
+      const raw =
+        el.getAttribute("data-href") ||
+        el.getAttribute("data-url") ||
+        el.getAttribute("data-link");
+      const resolvedSku = skuFromProductHref(raw);
+      if (resolvedSku) {
+        return ensureProxyProductAnchor(findBestClickableSubElement(card), itemUrlFromSku(resolvedSku));
+      }
+    }
+
+    if (itemUrl) {
+      return ensureProxyProductAnchor(findBestClickableSubElement(card), itemUrl);
+    }
+
     return null;
   }
 
@@ -458,12 +560,76 @@
     };
   }
 
+  function attachCardClickIsolation(card, anchor) {
+    if (!card || !anchor) return () => {};
+    const stop = (e) => {
+      if (e.target === anchor || anchor.contains?.(e.target)) {
+        e.stopPropagation();
+      }
+    };
+    card.addEventListener("click", stop, true);
+    card.addEventListener("mousedown", stop, true);
+    return () => {
+      card.removeEventListener("click", stop, true);
+      card.removeEventListener("mousedown", stop, true);
+    };
+  }
+
+  /** 滚到商品卡片 → 悬停 → 点击打开详情（模拟真实用户） */
+  async function humanPrepareAndClickProduct(card, link, options = {}) {
+    if (!card) throw new Error("未找到商品卡片");
+
+    const sku = card.getAttribute("data-sku");
+    const targetLink = link || findProductLinkInCard(card);
+    if (!targetLink) {
+      if (sku && /^\d{6,}$/.test(sku)) {
+        throw new Error(`未找到商品链接（sku=${sku}）`);
+      }
+      throw new Error("未找到商品链接");
+    }
+
+    const mouse = global.JdHumanMouse;
+    const scroll = global.JdHumanScroll;
+    if (!mouse?.humanClick) throw new Error("鼠标模拟模块未加载，请刷新页面后重试");
+
+    if (scroll?.scrollElementIntoViewHuman) {
+      await scroll.scrollElementIntoViewHuman(card, options.scroll || {});
+    } else {
+      card.scrollIntoView({ block: "center", behavior: "instant" });
+      await sleep(options.afterScrollMs ?? 320);
+    }
+
+    const openUrl =
+      targetLink.href ||
+      (sku && /^\d{6,}$/.test(sku) ? itemUrlFromSku(sku) : null);
+
+    const releaseIsolation = attachCardClickIsolation(card, targetLink);
+    try {
+      if (options.mode === "same_tab") {
+        if (mouse.humanHover) await mouse.humanHover(targetLink, options.hover || {});
+        await mouse.humanClick(targetLink, { ...options.click, skipNativeClick: true });
+        return { url: openUrl, mode: "same_tab" };
+      }
+
+      if (mouse.humanClickOpenInNewTab) {
+        const result = await mouse.humanClickOpenInNewTab(targetLink, options.click || {});
+        return { ...result, url: openUrl || result.url };
+      }
+
+      await mouse.humanClick(targetLink, { ...options.click, skipNativeClick: true });
+      return { url: openUrl, mode: "same_tab" };
+    } finally {
+      releaseIsolation();
+    }
+  }
+
   const api = {
     extractJdSearchProducts,
     extractJdSearchProductsMultiPage,
     collectUrlsFromSearchPage,
     collectSearchUrlsMultiPage,
     humanScrollPage,
+    humanPrepareAndClickProduct,
     findSearchCards,
     findProductLinkInCard,
     findNextPageButton,

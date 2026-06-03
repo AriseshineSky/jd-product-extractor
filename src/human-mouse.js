@@ -200,33 +200,112 @@
     return target;
   }
 
-  /** 贝塞尔移过去后 Ctrl/Cmd+点击，在新标签打开商品（保持搜索页不关） */
+  async function humanHover(element, options = {}) {
+    const target = resolveClickTarget(element);
+    if (!target) throw new Error("无法解析悬停目标");
+
+    target.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+    await sleep(options.beforeMoveMs ?? rand(120, 260));
+
+    const from = getStartPoint();
+    const to = targetAtElement(target, options);
+    await moveMouseAlongBezier(from, to, options.move || { durationMs: rand(420, 900) });
+
+    const hoverEl = elementUnderPoint(to.x, to.y);
+    dispatchMouse("mouseenter", to.x, to.y, hoverEl);
+    dispatchMouse("mouseover", to.x, to.y, hoverEl);
+    lastX = to.x;
+    lastY = to.y;
+    await sleep(options.afterHoverMs ?? rand(180, 420));
+    return target;
+  }
+
+  async function humanClickWithModifiers(element, options = {}) {
+    const target = resolveClickTarget(element);
+    if (!target) throw new Error("无法解析点击目标");
+
+    target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+    await sleep(options.beforeMoveMs ?? rand(180, 380));
+
+    const from = getStartPoint();
+    const to = targetAtElement(target, options);
+    await moveMouseAlongBezier(from, to, options.move || {});
+
+    await sleep(options.beforeClickMs ?? rand(60, 160));
+
+    const hoverEl = elementUnderPoint(to.x, to.y);
+    const mod = {
+      ctrlKey: !!options.ctrlKey,
+      metaKey: !!options.metaKey,
+      shiftKey: !!options.shiftKey,
+      button: options.button ?? 0,
+      buttons: options.buttons ?? (options.button === 1 ? 4 : 1),
+    };
+    dispatchMouse("mouseenter", to.x, to.y, hoverEl, mod);
+    dispatchMouse("mouseover", to.x, to.y, hoverEl, mod);
+    await sleep(rand(40, 100));
+    dispatchMouse("mousedown", to.x, to.y, hoverEl, mod);
+    await sleep(rand(55, 130));
+    dispatchMouse("mouseup", to.x, to.y, hoverEl, mod);
+    dispatchMouse("click", to.x, to.y, hoverEl, mod);
+    if (options.button === 1) {
+      try {
+        hoverEl.dispatchEvent(
+          new MouseEvent("auxclick", {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            clientX: to.x,
+            clientY: to.y,
+            button: 1,
+          })
+        );
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    if (!options.skipNativeClick && typeof target.click === "function") {
+      try {
+        target.click();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+
+    lastX = to.x;
+    lastY = to.y;
+    await sleep(options.afterClickMs ?? rand(120, 280));
+    return target;
+  }
+
+  /**
+   * 模拟用户 Ctrl/Cmd+点击在新标签打开商品（仅一次，不用 target=_blank 避免双开）。
+   */
   async function humanClickOpenInNewTab(element, options = {}) {
     const target = resolveClickTarget(element);
     if (!target) throw new Error("无法解析点击目标");
     const href = target.href || target.getAttribute?.("href");
     if (!href) throw new Error("商品链接无效");
     const absolute = new URL(href, location.href).href;
+    const isApple = /Mac|iPhone|iPad/i.test(navigator.platform || "");
 
-    await humanClick(target, {
+    await humanHover(target, options.hover || {});
+
+    await humanClickWithModifiers(target, {
       ...options,
       skipNativeClick: true,
-      ctrlKey: true,
-      metaKey: true,
+      ctrlKey: !isApple,
+      metaKey: isApple,
     });
 
-    let opened = null;
-    try {
-      opened = window.open(absolute, "_blank", "noopener");
-    } catch (_) {
-      /* popup blocked */
-    }
-
-    return { target, url: absolute, opened };
+    return { target, url: absolute, mode: "ctrl_click" };
   }
 
   const api = {
     humanClick,
+    humanHover,
+    humanClickWithModifiers,
     humanClickOpenInNewTab,
     moveMouseAlongBezier,
     getLastPosition: () => ({ x: lastX, y: lastY }),

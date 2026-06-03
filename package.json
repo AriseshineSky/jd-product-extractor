@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "test:saved": "node scripts/test_saved_page.mjs",
-    "test:search": "node scripts/test_search_page.mjs"
+    "test:search": "node scripts/test_search_page.mjs",
+    "test:taobao-search": "node scripts/test_taobao_search_page.mjs"
   },
   "devDependencies": {
     "linkedom": "^0.18.12"

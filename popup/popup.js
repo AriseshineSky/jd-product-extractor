@@ -20,6 +20,7 @@ const detailDelayInput = document.getElementById("detail-delay");
 const cacheUrlsBtn = document.getElementById("cache-urls-btn");
 const batchDetailBtn = document.getElementById("batch-detail-btn");
 const deepCrawlBtn = document.getElementById("deep-crawl-btn");
+const extractListBtn = document.getElementById("extract-list-btn");
 const jobControlsEl = document.getElementById("job-controls");
 const pauseJobBtn = document.getElementById("pause-job-btn");
 const stopJobBtn = document.getElementById("stop-job-btn");
@@ -85,20 +86,35 @@ function withTimeout(promise, timeoutMs, message) {
   ]);
 }
 
-async function injectSearchScripts(tabId) {
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    files: [
-      "src/jd-page-url.js",
-      "src/jd-risk.js",
-      "src/jd-scroll-pause.js",
-      "src/human-scroll.js",
-      "src/human-mouse.js",
-      "src/search-extractor.js",
-      "src/download.js",
-      "src/search-content.js",
-    ],
-  });
+function detectPlatform(url) {
+  return window.JdPageUrl?.detectPlatform(url) || null;
+}
+
+async function injectSearchScripts(tabId, platform = "jd") {
+  const common = [
+    "src/jd-page-url.js",
+    "src/jd-scroll-pause.js",
+    "src/human-scroll.js",
+    "src/human-mouse.js",
+    "src/download.js",
+  ];
+  const files =
+    platform === "taobao"
+      ? [
+          ...common.slice(0, 1),
+          "src/taobao-risk.js",
+          ...common.slice(1),
+          "src/taobao-search-extractor.js",
+          "src/taobao-search-content.js",
+        ]
+      : [
+          ...common.slice(0, 1),
+          "src/jd-risk.js",
+          ...common.slice(1),
+          "src/search-extractor.js",
+          "src/search-content.js",
+        ];
+  await chrome.scripting.executeScript({ target: { tabId }, files });
 }
 
 async function injectItemScripts(tabId) {
@@ -116,13 +132,14 @@ async function injectItemScripts(tabId) {
 }
 
 async function sendSearchMessage(tab, type, options = {}) {
+  const platform = detectPlatform(tab.url) || "jd";
   async function send() {
     return chrome.tabs.sendMessage(tab.id, { type, options });
   }
   try {
     return await send();
   } catch (_) {
-    await injectSearchScripts(tab.id);
+    await injectSearchScripts(tab.id, platform);
     return send();
   }
 }
@@ -151,9 +168,12 @@ async function extractItemFromTab(tab, { download = false } = {}) {
 
 async function cacheSearchUrlsFromTab(tab, maxPages = 1) {
   if (!tab?.id || detectMode(tab.url) !== "list") {
-    throw new Error("请先打开京东搜索/分类列表页");
+    throw new Error("请先打开京东或淘宝/天猫搜索列表页");
   }
-  const response = await sendSearchMessage(tab, "CACHE_JD_SEARCH_URLS", { maxPages });
+  const platform = detectPlatform(tab.url) || "jd";
+  const messageType =
+    platform === "taobao" ? "CACHE_TAOBAO_SEARCH_URLS" : "CACHE_JD_SEARCH_URLS";
+  const response = await sendSearchMessage(tab, messageType, { maxPages });
   if (!response?.ok) throw new Error(response?.error || "缓存链接失败");
   const saved = await chrome.runtime.sendMessage({
     type: "APPEND_PRODUCT_URLS",
@@ -161,6 +181,25 @@ async function cacheSearchUrlsFromTab(tab, maxPages = 1) {
   });
   if (!saved?.ok) throw new Error(saved?.error || "保存链接缓存失败");
   return { response, saved };
+}
+
+async function extractSearchListFromTab(tab, maxPages = 1) {
+  if (!tab?.id || detectMode(tab.url) !== "list") {
+    throw new Error("请先打开淘宝/天猫搜索列表页");
+  }
+  const response = await sendSearchMessage(tab, "EXTRACT_TAOBAO_SEARCH_LIST", { maxPages });
+  if (!response?.ok) throw new Error(response?.error || "提取列表失败");
+
+  let savedCount = 0;
+  for (const product of response.data.products) {
+    const saved = await chrome.runtime.sendMessage({
+      type: "APPEND_JSONL_RECORD",
+      product,
+    });
+    if (saved?.ok) savedCount = saved.count;
+  }
+
+  return { response, savedCount };
 }
 
 async function runBatchDetailFromPopup(tab) {
@@ -191,20 +230,25 @@ function stripInternalFields(data) {
 
 function updateUiForTab(tab) {
   const mode = detectMode(tab?.url);
+  const platform = detectPlatform(tab?.url);
   lastMode = mode;
 
   const isItem = mode === "item";
   const isList = mode === "list";
+  const isTaobaoList = isList && platform === "taobao";
 
   if (itemActionsEl) itemActionsEl.hidden = !isItem;
   if (searchOptionsEl) searchOptionsEl.hidden = !isList;
   if (searchActionsEl) searchActionsEl.hidden = !isList;
+  if (batchDetailBtn) batchDetailBtn.hidden = isTaobaoList;
+  if (deepCrawlBtn) deepCrawlBtn.hidden = isTaobaoList;
+  if (extractListBtn) extractListBtn.hidden = !isTaobaoList;
   if (clearLinksBtn) clearLinksBtn.hidden = false;
   if (unsupportedNoticeEl) unsupportedNoticeEl.hidden = mode !== "unsupported";
 
   if (pageModeEl) {
     pageModeEl.hidden = false;
-    pageModeEl.textContent = JdPageUrl.pageModeLabel(mode);
+    pageModeEl.textContent = JdPageUrl.pageModeLabel(mode, tab?.url);
     pageModeEl.className = `page-mode mode-${mode}`;
   }
 
@@ -212,6 +256,9 @@ function updateUiForTab(tab) {
     if (isItem) {
       hintEl.textContent =
         "商品页会先平滑滚屏再提取；「只提取」仅写入详情缓存，不触发下载";
+    } else if (isTaobaoList) {
+      hintEl.textContent =
+        "淘宝/天猫搜索页：「翻页缓存链接」收集商品 URL；「提取搜索列表」写入列表级商品数据";
     } else if (isList) {
       hintEl.textContent =
         "「翻页缓存链接」只收集链接；「逐一点开详情提取」会同时写入详情与链接队列";
@@ -234,6 +281,7 @@ function setBusy(busy) {
   if (cacheUrlsBtn) cacheUrlsBtn.disabled = busy;
   if (batchDetailBtn) batchDetailBtn.disabled = busy;
   if (deepCrawlBtn) deepCrawlBtn.disabled = busy;
+  if (extractListBtn) extractListBtn.disabled = busy;
 }
 
 async function getCrawlJobState() {
@@ -258,6 +306,7 @@ function updateJobControlsUi(state) {
     if (cacheUrlsBtn) cacheUrlsBtn.disabled = true;
     if (batchDetailBtn) batchDetailBtn.disabled = true;
     if (deepCrawlBtn) deepCrawlBtn.disabled = true;
+    if (extractListBtn) extractListBtn.disabled = true;
   }
 }
 
@@ -271,6 +320,7 @@ async function syncJobControlsFromBackground() {
       if (cacheUrlsBtn) cacheUrlsBtn.disabled = busy;
       if (batchDetailBtn) batchDetailBtn.disabled = busy;
       if (deepCrawlBtn) deepCrawlBtn.disabled = busy;
+      if (extractListBtn) extractListBtn.disabled = busy;
     }
   }
 }
@@ -440,6 +490,44 @@ if (cacheUrlsBtn) {
       );
       setStatus(
         `已缓存 ${response.data.count} 个链接（${response.data.pages || 1} 页），链接缓存共 ${saved.count} 条`,
+        "ok"
+      );
+      await refreshCacheStatus();
+    } catch (error) {
+      setStatus(String(error.message || error), "error");
+    } finally {
+      setBusy(false);
+    }
+  });
+}
+
+if (extractListBtn) {
+  extractListBtn.addEventListener("click", async () => {
+    setBusy(true);
+    setStatus("正在提取淘宝/天猫搜索列表…");
+    try {
+      const tab = await getActiveTab();
+      updateUiForTab(tab);
+      assertMode("list", "提取搜索列表");
+      const { pages } = await saveSearchSettings();
+      const timeoutMs = 60000 + pages * 55000;
+      const { response, savedCount } = await withTimeout(
+        extractSearchListFromTab(tab, pages),
+        timeoutMs,
+        "提取列表超时"
+      );
+      const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
+      if (records?.ok && records.count) {
+        const stamp = new Date().toISOString().slice(0, 10);
+        const keyword = response.data.keyword || "search";
+        const safeKeyword = String(keyword).replace(/[^\w\u4e00-\u9fa5-]+/g, "_").slice(0, 40);
+        JdJsonlDownload.downloadRecords(
+          records.records,
+          records.filename || `tb-list-${stamp}-${safeKeyword}.jsonl`
+        );
+      }
+      setStatus(
+        `已提取 ${response.data.count} 条（${response.data.pages || 1} 页），详情缓存共 ${savedCount} 条，已下载 JSONL`,
         "ok"
       );
       await refreshCacheStatus();

@@ -208,6 +208,40 @@
     }
   }
 
+  /** 分段滚到元素附近，模拟用户浏览列表后再点击 */
+  async function scrollElementIntoViewHuman(el, options = {}) {
+    if (!el) return;
+    await scrollGate(options);
+
+    const rect = el.getBoundingClientRect();
+    const viewport = viewportHeight();
+    const marginTop = Number(options.marginTop) || rand(80, 140);
+    const marginBottom = Number(options.marginBottom) || rand(100, 180);
+    const idealTop = marginTop;
+    const idealBottom = viewport - marginBottom;
+
+    if (rect.top >= idealTop && rect.bottom <= idealBottom) {
+      await sleep(rand(180, 360));
+      return;
+    }
+
+    const targets = discoverScrollTargets();
+    const deltaWindow = rect.top - idealTop - rand(-20, 30);
+
+    for (const target of targets) {
+      if (target.kind !== "window") continue;
+      const fromY = target.getY();
+      const toY = Math.max(0, Math.min(fromY + deltaWindow, target.maxY()));
+      if (Math.abs(toY - fromY) < 6) continue;
+      await scrollGate(options);
+      await animateTargetY(target, fromY, toY, rand(650, 1100), EASINGS.read);
+      break;
+    }
+
+    await scrollGate(options);
+    await sleep(rand(220, 420));
+  }
+
   /**
    * 对所有可滚动容器分段滚到底（可见窗口会跟着动）。
    */
@@ -314,6 +348,7 @@
 
   const api = {
     scrollPageToBottom,
+    scrollElementIntoViewHuman,
     discoverScrollTargets,
     animateTargetY,
     cubicBezier,

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "JD Product Extractor",
-  "version": "1.3.1",
-  "description": "Extract JD item and search page product data into StandardProduct-compatible JSON.",
+  "version": "1.3.7",
+  "description": "Extract JD and Taobao/Tmall item and search page product data into StandardProduct-compatible JSON.",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": [
     "https://search.jd.com/*",
@@ -18,7 +18,11 @@
     "https://passport.jd.com/*",
     "https://aq.jd.com/*",
     "https://*.360buyimg.com/*",
-    "https://vod.jd.com/*"
+    "https://vod.jd.com/*",
+    "https://s.taobao.com/*",
+    "https://*.taobao.com/*",
+    "https://*.tmall.com/*",
+    "https://*.alicdn.com/*"
   ],
   "action": {
     "default_title": "Extract JD Product",
@@ -28,6 +32,20 @@
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": ["https://s.taobao.com/search*"],
+      "js": [
+        "src/jd-page-url.js",
+        "src/taobao-risk.js",
+        "src/jd-scroll-pause.js",
+        "src/human-scroll.js",
+        "src/human-mouse.js",
+        "src/taobao-search-extractor.js",
+        "src/download.js",
+        "src/taobao-search-content.js"
+      ],
+      "run_at": "document_idle"
+    },
     {
       "matches": ["https://search.jd.com/*", "https://list.jd.com/*"],
       "js": [
