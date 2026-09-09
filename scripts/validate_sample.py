@@ -10,7 +10,7 @@ from em_product.product import ProductSource, StandardProduct  # noqa: E402
 
 
 def main():
-    sample_path = Path(__file__).with_name("sample_product.json")
+    sample_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("sample_product.json")
     data = json.loads(sample_path.read_text(encoding="utf-8"))
     source = ProductSource(**data)
     standard = StandardProduct(**data)

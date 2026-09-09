@@ -330,80 +330,6 @@
     return false;
   }
 
-  async function collectUrlsFromSearchPage(options = {}) {
-    await humanScrollPage(options);
-
-    const keyword = options.keyword || searchKeywordFromUrl();
-    const page = options.page || new URLSearchParams(location.search).get("page") || "1";
-    const entries = [];
-    const seen = new Set();
-
-    findSearchCards().forEach((card) => {
-      const link = findProductLinkInCard(card);
-      const href = link?.getAttribute("href") || link?.href;
-      const id = itemIdFromHref(href);
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      const isTmall = sourceFromCard(card, href) === "tmall";
-      entries.push({
-        url: itemUrlFromId(id, isTmall),
-        sku: id,
-        title: pickTitle(card) || null,
-        search_keyword: keyword,
-        search_page: String(page),
-        collected_at: isoDateNow(),
-      });
-    });
-
-    if (!entries.length) {
-      throw new Error("未找到可缓存的商品链接，请确认搜索页已加载完成");
-    }
-
-    return { keyword, page, count: entries.length, urls: entries };
-  }
-
-  async function collectSearchUrlsMultiPage(options = {}) {
-    const maxPages = Math.min(Math.max(1, Number(options.maxPages) || 1), 50);
-    const delayMs = Number(options.delayMs) || 2000;
-    const keyword = options.keyword || searchKeywordFromUrl();
-    const allUrls = [];
-    const seenIds = new Set();
-    let pagesDone = 0;
-
-    for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
-      if (options.onPageCheckpoint) await options.onPageCheckpoint(pageNum);
-
-      const batch = await collectUrlsFromSearchPage({
-        ...options,
-        keyword,
-        page: String(pageNum),
-      });
-      for (const entry of batch.urls) {
-        if (seenIds.has(entry.sku)) continue;
-        seenIds.add(entry.sku);
-        allUrls.push(entry);
-      }
-      pagesDone = pageNum;
-
-      if (pageNum >= maxPages) break;
-      if (!isNextPageAvailable()) break;
-
-      const idsBefore = new Set(seenIds);
-      await clickNextPage();
-      const updated = await waitForNewSearchResults(idsBefore, 15000);
-      if (!updated) break;
-      await sleep(delayMs);
-    }
-
-    return {
-      keyword,
-      page: `1-${pagesDone}`,
-      pages: pagesDone,
-      count: allUrls.length,
-      urls: allUrls,
-    };
-  }
-
   async function extractTaobaoSearchProductsMultiPage(options = {}) {
     const maxPages = Math.min(Math.max(1, Number(options.maxPages) || 1), 50);
     const delayMs = Number(options.delayMs) || 2000;
@@ -491,8 +417,6 @@
   const api = {
     extractTaobaoSearchProducts,
     extractTaobaoSearchProductsMultiPage,
-    collectUrlsFromSearchPage,
-    collectSearchUrlsMultiPage,
     humanScrollPage,
     findSearchCards,
     findProductLinkInCard,

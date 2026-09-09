@@ -1,56 +1,19 @@
 const extractBtn = document.getElementById("extract-btn");
-const extractOnlyBtn = document.getElementById("extract-only-btn");
 const copyBtn = document.getElementById("copy-btn");
 const downloadDetailBtn = document.getElementById("download-detail-btn");
-const downloadLinksBtn = document.getElementById("download-links-btn");
 const clearDetailBtn = document.getElementById("clear-detail-btn");
-const clearLinksBtn = document.getElementById("clear-links-btn");
 const statusEl = document.getElementById("status");
 const cacheStatusEl = document.getElementById("cache-status");
-const jobStatusEl = document.getElementById("job-status");
 const outputEl = document.getElementById("output");
 const hintEl = document.querySelector(".hint");
 const pageModeEl = document.getElementById("page-mode");
 const unsupportedNoticeEl = document.getElementById("unsupported-notice");
-const searchOptionsEl = document.getElementById("search-options");
 const searchActionsEl = document.getElementById("search-actions");
 const itemActionsEl = document.querySelector(".item-actions");
-const searchPagesInput = document.getElementById("search-pages");
-const detailDelayInput = document.getElementById("detail-delay");
-const cacheUrlsBtn = document.getElementById("cache-urls-btn");
-const batchDetailBtn = document.getElementById("batch-detail-btn");
-const deepCrawlBtn = document.getElementById("deep-crawl-btn");
 const extractListBtn = document.getElementById("extract-list-btn");
-const jobControlsEl = document.getElementById("job-controls");
-const pauseJobBtn = document.getElementById("pause-job-btn");
-const stopJobBtn = document.getElementById("stop-job-btn");
 
 let lastPayload = null;
 let lastMode = "item";
-
-async function loadSearchSettings() {
-  const stored = await chrome.storage.local.get(["jd_search_max_pages", "jd_detail_tab_delay_ms"]);
-  const pages = parseInt(stored.jd_search_max_pages, 10);
-  const delay = parseInt(stored.jd_detail_tab_delay_ms, 10);
-  if (searchPagesInput && Number.isFinite(pages) && pages >= 1) {
-    searchPagesInput.value = String(Math.min(pages, 50));
-  }
-  if (detailDelayInput && Number.isFinite(delay) && delay >= 500) {
-    detailDelayInput.value = String(Math.min(delay, 15000));
-  }
-}
-
-async function saveSearchSettings() {
-  const pages = Math.min(50, Math.max(1, parseInt(searchPagesInput?.value, 10) || 5));
-  const delay = Math.min(15000, Math.max(500, parseInt(detailDelayInput?.value, 10) || 2500));
-  if (searchPagesInput) searchPagesInput.value = String(pages);
-  if (detailDelayInput) detailDelayInput.value = String(delay);
-  await chrome.storage.local.set({
-    jd_search_max_pages: pages,
-    jd_detail_tab_delay_ms: delay,
-  });
-  return { pages, delay };
-}
 
 function setStatus(text, kind = "") {
   statusEl.textContent = text;
@@ -67,7 +30,7 @@ function assertMode(expected, label) {
     throw new Error(`请在商品详情页使用「${label}」`);
   }
   if (expected === "list") {
-    throw new Error(`请在搜索/分类列表页使用「${label}」`);
+    throw new Error(`请在淘宝/天猫搜索列表页使用「${label}」`);
   }
   throw new Error("当前页面不支持此操作");
 }
@@ -90,69 +53,68 @@ function detectPlatform(url) {
   return window.JdPageUrl?.detectPlatform(url) || null;
 }
 
-async function injectSearchScripts(tabId, platform = "jd") {
-  const common = [
-    "src/jd-page-url.js",
-    "src/jd-scroll-pause.js",
-    "src/human-scroll.js",
-    "src/human-mouse.js",
-    "src/download.js",
-  ];
-  const files =
-    platform === "taobao"
-      ? [
-          ...common.slice(0, 1),
-          "src/taobao-risk.js",
-          ...common.slice(1),
-          "src/taobao-search-extractor.js",
-          "src/taobao-search-content.js",
-        ]
-      : [
-          ...common.slice(0, 1),
-          "src/jd-risk.js",
-          ...common.slice(1),
-          "src/search-extractor.js",
-          "src/search-content.js",
-        ];
-  await chrome.scripting.executeScript({ target: { tabId }, files });
-}
-
-async function injectItemScripts(tabId) {
+async function injectSearchScripts(tabId) {
   await chrome.scripting.executeScript({
     target: { tabId },
     files: [
       "src/jd-page-url.js",
-      "src/jd-scroll-pause.js",
+      "src/taobao-risk.js",
       "src/human-scroll.js",
-      "src/extractor.js",
+      "src/human-mouse.js",
+      "src/taobao-search-extractor.js",
       "src/download.js",
-      "src/content.js",
+      "src/taobao-search-content.js",
     ],
   });
 }
 
+async function injectItemScripts(tabId, platform = "jd") {
+  const files =
+    platform === "taobao"
+      ? [
+          "src/jd-page-url.js",
+          "src/tmall-extractor.js",
+          "src/download.js",
+          "src/tmall-content.js",
+        ]
+      : [
+          "src/jd-page-url.js",
+          "src/human-scroll.js",
+          "src/extractor.js",
+          "src/download.js",
+          "src/content.js",
+        ];
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files,
+  });
+}
+
 async function sendSearchMessage(tab, type, options = {}) {
-  const platform = detectPlatform(tab.url) || "jd";
   async function send() {
     return chrome.tabs.sendMessage(tab.id, { type, options });
   }
   try {
     return await send();
   } catch (_) {
-    await injectSearchScripts(tab.id, platform);
+    await injectSearchScripts(tab.id);
     return send();
   }
 }
 
-async function extractItemFromTab(tab, { download = false } = {}) {
+async function extractItemFromTab(tab) {
   if (!tab?.id || detectMode(tab.url) !== "item") {
-    throw new Error("请先打开京东商品详情页 (item.jd.com/xxx.html)");
+    throw new Error("请先打开京东/天猫商品详情页");
   }
+  const platform = detectPlatform(tab.url) || "jd";
 
-  const payload = {
-    type: "EXTRACT_JD_PRODUCT_WITH_SCROLL",
-    options: { scroll: false, save: true, download },
-  };
+  const payload =
+    platform === "taobao"
+      ? { type: "EXTRACT_TMALL_PRODUCT", options: { save: true } }
+      : {
+          type: "EXTRACT_JD_PRODUCT_WITH_SCROLL",
+          options: { scroll: false, save: true },
+        };
 
   async function sendExtract() {
     return chrome.tabs.sendMessage(tab.id, payload);
@@ -161,26 +123,9 @@ async function extractItemFromTab(tab, { download = false } = {}) {
   try {
     return await sendExtract();
   } catch (_) {
-    await injectItemScripts(tab.id);
+    await injectItemScripts(tab.id, platform);
     return sendExtract();
   }
-}
-
-async function cacheSearchUrlsFromTab(tab, maxPages = 1) {
-  if (!tab?.id || detectMode(tab.url) !== "list") {
-    throw new Error("请先打开京东或淘宝/天猫搜索列表页");
-  }
-  const platform = detectPlatform(tab.url) || "jd";
-  const messageType =
-    platform === "taobao" ? "CACHE_TAOBAO_SEARCH_URLS" : "CACHE_JD_SEARCH_URLS";
-  const response = await sendSearchMessage(tab, messageType, { maxPages });
-  if (!response?.ok) throw new Error(response?.error || "缓存链接失败");
-  const saved = await chrome.runtime.sendMessage({
-    type: "APPEND_PRODUCT_URLS",
-    urls: response.data.urls,
-  });
-  if (!saved?.ok) throw new Error(saved?.error || "保存链接缓存失败");
-  return { response, saved };
 }
 
 async function extractSearchListFromTab(tab, maxPages = 1) {
@@ -191,36 +136,13 @@ async function extractSearchListFromTab(tab, maxPages = 1) {
   if (!response?.ok) throw new Error(response?.error || "提取列表失败");
 
   let savedCount = 0;
-  for (const product of response.data.products) {
-    const saved = await chrome.runtime.sendMessage({
-      type: "APPEND_JSONL_RECORD",
-      product,
-    });
-    if (saved?.ok) savedCount = saved.count;
-  }
+  const saved = await chrome.runtime.sendMessage({
+    type: "APPEND_JSONL_RECORDS",
+    products: response.data.products,
+  });
+  if (saved?.ok) savedCount = saved.count;
 
   return { response, savedCount };
-}
-
-async function runBatchDetailFromPopup(tab) {
-  if (!tab?.id || detectMode(tab.url) !== "list") {
-    throw new Error("请在搜索/分类列表页打开本扩展，并保持该标签处于活动状态");
-  }
-  const queue = await chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" });
-  if (!queue?.ok || !queue.count) {
-    throw new Error("链接缓存为空，请先「翻页缓存链接」");
-  }
-
-  const { delay } = await saveSearchSettings();
-  const timeoutMs = queue.count * (90000 + delay);
-
-  const response = await withTimeout(
-    sendSearchMessage(tab, "RUN_BATCH_DETAIL_FROM_QUEUE"),
-    timeoutMs,
-    "批量详情提取超时，请减少链接数量或提高间隔后重试"
-  );
-  if (!response?.ok) throw new Error(response?.error || "批量详情提取失败");
-  return queue;
 }
 
 function stripInternalFields(data) {
@@ -234,17 +156,17 @@ function updateUiForTab(tab) {
   lastMode = mode;
 
   const isItem = mode === "item";
-  const isList = mode === "list";
-  const isTaobaoList = isList && platform === "taobao";
+  const isTaobaoList = mode === "list" && platform === "taobao";
+  const isJdList = mode === "list" && platform !== "taobao";
 
   if (itemActionsEl) itemActionsEl.hidden = !isItem;
-  if (searchOptionsEl) searchOptionsEl.hidden = !isList;
-  if (searchActionsEl) searchActionsEl.hidden = !isList;
-  if (batchDetailBtn) batchDetailBtn.hidden = isTaobaoList;
-  if (deepCrawlBtn) deepCrawlBtn.hidden = isTaobaoList;
+  if (searchActionsEl) searchActionsEl.hidden = !isTaobaoList;
   if (extractListBtn) extractListBtn.hidden = !isTaobaoList;
-  if (clearLinksBtn) clearLinksBtn.hidden = false;
-  if (unsupportedNoticeEl) unsupportedNoticeEl.hidden = mode !== "unsupported";
+  if (unsupportedNoticeEl) unsupportedNoticeEl.hidden = !(isJdList || mode === "unsupported");
+  if (unsupportedNoticeEl && isJdList) {
+    unsupportedNoticeEl.innerHTML =
+      "京东<strong>搜索/列表页</strong>的自动抓取功能已移除，请打开<strong>商品详情页</strong>或<strong>淘宝搜索列表页</strong>。";
+  }
 
   if (pageModeEl) {
     pageModeEl.hidden = false;
@@ -253,17 +175,15 @@ function updateUiForTab(tab) {
   }
 
   if (hintEl) {
-    if (isItem) {
+    if (isItem && platform === "taobao") {
+      hintEl.textContent = "天猫/淘宝商品页：直接点击提取即可；图文详情随页面滚动自动加载";
+    } else if (isItem) {
       hintEl.textContent =
-        "商品页需先手动向下滚动加载图文详情后再提取；「只提取」仅写入详情缓存，不触发下载";
+        "京东商品页需先手动向下滚动加载图文详情后再提取；提取结果写入详情缓存，可用「统一下载全部 JSONL」导出";
     } else if (isTaobaoList) {
-      hintEl.textContent =
-        "淘宝/天猫搜索页：「翻页缓存链接」收集商品 URL；「提取搜索列表」写入列表级商品数据";
-    } else if (isList) {
-      hintEl.textContent =
-        "「翻页缓存链接」只收集链接；「逐一点开详情提取」会同时写入详情与链接队列";
+      hintEl.textContent = "淘宝搜索页：「提取搜索列表」写入列表级商品数据，缓存到弹窗统一下载";
     } else {
-      hintEl.textContent = "下方可管理已缓存的详情/链接数据";
+      hintEl.textContent = "当前页面不支持本扩展";
     }
   }
 
@@ -276,56 +196,11 @@ function updateUiForTab(tab) {
 
 function setBusy(busy) {
   if (extractBtn) extractBtn.disabled = busy;
-  if (extractOnlyBtn) extractOnlyBtn.disabled = busy;
   copyBtn.disabled = busy || !lastPayload;
-  if (cacheUrlsBtn) cacheUrlsBtn.disabled = busy;
-  if (batchDetailBtn) batchDetailBtn.disabled = busy;
-  if (deepCrawlBtn) deepCrawlBtn.disabled = busy;
   if (extractListBtn) extractListBtn.disabled = busy;
 }
 
-async function getCrawlJobState() {
-  try {
-    const res = await chrome.runtime.sendMessage({ type: "GET_CRAWL_JOB_STATE" });
-    return res?.state || { active: false, paused: false, stopped: false };
-  } catch (_) {
-    return { active: false, paused: false, stopped: false };
-  }
-}
-
-function updateJobControlsUi(state) {
-  const active = !!state?.active;
-  if (jobControlsEl) jobControlsEl.hidden = !active;
-  if (pauseJobBtn) {
-    pauseJobBtn.disabled = !active;
-    pauseJobBtn.textContent = state?.paused ? "继续" : "暂停";
-  }
-  if (stopJobBtn) stopJobBtn.disabled = !active;
-
-  if (active) {
-    if (cacheUrlsBtn) cacheUrlsBtn.disabled = true;
-    if (batchDetailBtn) batchDetailBtn.disabled = true;
-    if (deepCrawlBtn) deepCrawlBtn.disabled = true;
-    if (extractListBtn) extractListBtn.disabled = true;
-  }
-}
-
-async function syncJobControlsFromBackground() {
-  const state = await getCrawlJobState();
-  updateJobControlsUi(state);
-  if (!state.active) {
-    const tab = await getActiveTab();
-    const busy = false;
-    if (detectMode(tab?.url) === "list") {
-      if (cacheUrlsBtn) cacheUrlsBtn.disabled = busy;
-      if (batchDetailBtn) batchDetailBtn.disabled = busy;
-      if (deepCrawlBtn) deepCrawlBtn.disabled = busy;
-      if (extractListBtn) extractListBtn.disabled = busy;
-    }
-  }
-}
-
-async function runItemExtract({ download }) {
+async function runItemExtract() {
   const tab = await getActiveTab();
   updateUiForTab(tab);
 
@@ -333,20 +208,15 @@ async function runItemExtract({ download }) {
     await chrome.tabs.update(tab.id, { active: true });
   }
 
-  setStatus(download ? "正在提取并下载 JSONL（请看商品页标签）…" : "正在提取并写入详情缓存（请看商品页）…");
+  setStatus("正在提取并写入详情缓存（请看商品页）…");
 
   const response = await withTimeout(
-    extractItemFromTab(tab, { download }),
+    extractItemFromTab(tab),
     120000,
     "提取超时：请确认商品页在前台且已加载完成"
   );
 
   if (!response?.ok) {
-    if (response?.code === "DESCRIPTION_NOT_LOADED") {
-      throw new Error(
-        "商品描述尚未加载：请先在商品页面向下滚动，等待图文详情出现后再点击提取"
-      );
-    }
     throw new Error(response?.error || "提取失败");
   }
 
@@ -356,106 +226,22 @@ async function runItemExtract({ download }) {
   copyBtn.disabled = false;
 
   const count = response.saved?.count ?? "?";
-  if (download) {
-    if (validationErrors.length) {
-      setStatus(`已提取并下载详情 JSONL（详情缓存 ${count} 条），校验: ${validationErrors.join("; ")}`, "warn");
-    } else {
-      setStatus(`已提取并下载详情 JSONL（详情缓存 ${count} 条）`, "ok");
-    }
-  } else if (validationErrors.length) {
+  if (validationErrors.length) {
     setStatus(`已写入详情缓存（${count} 条），校验: ${validationErrors.join("; ")}`, "warn");
   } else {
     setStatus(`已写入详情缓存（${count} 条），未下载文件`, "ok");
   }
 }
 
-const JOB_KIND_LABELS = {
-  "deep-crawl": "深度抓取",
-  "batch-detail": "批量详情",
-  "cache-urls": "翻页缓存链接",
-};
-
-async function refreshJobStatus() {
-  if (!jobStatusEl) return;
-  try {
-    const diag = await chrome.runtime.sendMessage({ type: "GET_CRAWL_DIAGNOSTICS" });
-    if (!diag?.ok) {
-      jobStatusEl.hidden = true;
-      return;
-    }
-    const { state, checkpoint: cp, linkCount, detailCount, log } = diag;
-    const show = state?.active || Boolean(cp?.kind);
-    if (!show) {
-      jobStatusEl.hidden = true;
-      return;
-    }
-
-    jobStatusEl.hidden = false;
-    jobStatusEl.classList.remove("running", "paused", "stopped");
-    if (state?.active && !state?.paused) jobStatusEl.classList.add("running");
-    else if (state?.paused) jobStatusEl.classList.add("paused");
-    else jobStatusEl.classList.add("stopped");
-
-    const lines = [];
-    if (state?.active && !state?.paused) lines.push("插件：运行中");
-    else if (state?.paused && state?.pauseReason === "risk") {
-      lines.push("插件：等待京东验证 — 请人工完成，通过后自动继续");
-    } else if (state?.paused) lines.push("插件：已暂停");
-    else lines.push("插件：已停止（可续跑）");
-
-    const kind = JOB_KIND_LABELS[state?.kind] || JOB_KIND_LABELS[cp?.kind] || "";
-    if (kind) lines.push(`任务：${kind}`);
-
-    if (cp?.kind === "deep-crawl") {
-      lines.push(
-        `进度：搜索第${cp.pageNum || 1}页 · 第${(cp.cardIndex ?? 0) + 1}个商品 · 详情${cp.stats?.detailOk ?? 0}条`
-      );
-    } else if (cp?.kind === "batch-detail" && Number.isFinite(cp.queueIndex)) {
-      lines.push(`进度：队列 ${cp.queueIndex + 1}/${linkCount ?? "?"} · 详情${detailCount ?? 0}条`);
-    }
-
-    if (cp?.stop_reason && !state?.active) lines.push(`原因：${cp.stop_reason}`);
-
-    const lastLog = log?.length ? log[log.length - 1] : null;
-    if (lastLog?.detail) lines.push(`最近：${lastLog.event} ${lastLog.detail}`.slice(0, 120));
-
-    jobStatusEl.textContent = lines.join(" · ");
-  } catch (_) {
-    jobStatusEl.hidden = true;
-  }
-}
-
 async function refreshCacheStatus() {
-  const [details, links] = await Promise.all([
-    chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" }),
-    chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" }),
-  ]);
+  const details = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
   const detailCount = details?.ok ? details.count : 0;
-  const linkCount = links?.ok ? links.count : 0;
-  await refreshJobStatus();
+  const maxRecords = details?.ok && details.maxRecords ? details.maxRecords : 100;
 
   if (cacheStatusEl) {
     cacheStatusEl.textContent =
-      `当前缓存：详情 ${detailCount} 条，链接 ${linkCount} 条（链接仅来自搜索页「翻页缓存链接」）`;
+      `当前缓存：详情 ${detailCount} 条（最多保留 ${maxRecords} 条，超出自动删除最旧）`;
   }
-}
-
-if (extractOnlyBtn) {
-  extractOnlyBtn.addEventListener("click", async () => {
-    setBusy(true);
-    copyBtn.disabled = true;
-    outputEl.textContent = "";
-    try {
-      assertMode("item", "只提取商品信息");
-      await runItemExtract({ download: false });
-      await refreshCacheStatus();
-    } catch (error) {
-      lastPayload = null;
-      setStatus(String(error.message || error), "error");
-    } finally {
-      setBusy(false);
-    }
-  });
 }
 
 if (extractBtn) {
@@ -468,39 +254,11 @@ if (extractBtn) {
     try {
       const tab = await getActiveTab();
       updateUiForTab(tab);
-      assertMode("item", "提取并下载 JSONL");
-      await runItemExtract({ download: true });
+      assertMode("item", "提取并写入缓存");
+      await runItemExtract();
       await refreshCacheStatus();
     } catch (error) {
       lastPayload = null;
-      setStatus(String(error.message || error), "error");
-    } finally {
-      setBusy(false);
-    }
-  });
-}
-
-if (cacheUrlsBtn) {
-  cacheUrlsBtn.addEventListener("click", async () => {
-    setBusy(true);
-    setStatus("正在翻页并缓存商品链接…");
-    try {
-      const tab = await getActiveTab();
-      updateUiForTab(tab);
-      assertMode("list", "翻页缓存链接");
-      const { pages } = await saveSearchSettings();
-      const timeoutMs = 60000 + pages * 55000;
-      const { response, saved } = await withTimeout(
-        cacheSearchUrlsFromTab(tab, pages),
-        timeoutMs,
-        "缓存链接超时"
-      );
-      setStatus(
-        `已缓存 ${response.data.count} 个链接（${response.data.pages || 1} 页），链接缓存共 ${saved.count} 条`,
-        "ok"
-      );
-      await refreshCacheStatus();
-    } catch (error) {
       setStatus(String(error.message || error), "error");
     } finally {
       setBusy(false);
@@ -516,78 +274,14 @@ if (extractListBtn) {
       const tab = await getActiveTab();
       updateUiForTab(tab);
       assertMode("list", "提取搜索列表");
-      const { pages } = await saveSearchSettings();
-      const timeoutMs = 60000 + pages * 55000;
+      const timeoutMs = 120000;
       const { response, savedCount } = await withTimeout(
-        extractSearchListFromTab(tab, pages),
+        extractSearchListFromTab(tab, 1),
         timeoutMs,
         "提取列表超时"
       );
-      const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
-      if (records?.ok && records.count) {
-        const stamp = new Date().toISOString().slice(0, 10);
-        const keyword = response.data.keyword || "search";
-        const safeKeyword = String(keyword).replace(/[^\w\u4e00-\u9fa5-]+/g, "_").slice(0, 40);
-        JdJsonlDownload.downloadRecords(
-          records.records,
-          records.filename || `tb-list-${stamp}-${safeKeyword}.jsonl`
-        );
-      }
       setStatus(
-        `已提取 ${response.data.count} 条（${response.data.pages || 1} 页），详情缓存共 ${savedCount} 条，已下载 JSONL`,
-        "ok"
-      );
-      await refreshCacheStatus();
-    } catch (error) {
-      setStatus(String(error.message || error), "error");
-    } finally {
-      setBusy(false);
-    }
-  });
-}
-
-if (deepCrawlBtn) {
-  deepCrawlBtn.addEventListener("click", async () => {
-    setBusy(true);
-    setStatus("深度抓取中：请保持搜索页标签在前台，过程较长…");
-    try {
-      const tab = await getActiveTab();
-      updateUiForTab(tab);
-      assertMode("list", "逐一点开详情提取");
-      const { pages } = await saveSearchSettings();
-      const timeoutMs = 120000 + pages * 120000;
-      await withTimeout(
-        sendSearchMessage(tab, "DEEP_CRAWL_JD_SEARCH", {
-          maxPages: pages,
-          multiPage: pages > 1,
-          downloadAtEnd: true,
-        }),
-        timeoutMs,
-        "深度抓取超时，请减少翻页数或提高详情间隔"
-      );
-      const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
-      setStatus(`深度抓取完成，详情缓存 ${records?.count ?? "?"} 条`, "ok");
-      await refreshCacheStatus();
-    } catch (error) {
-      setStatus(String(error.message || error), "error");
-    } finally {
-      setBusy(false);
-    }
-  });
-}
-
-if (batchDetailBtn) {
-  batchDetailBtn.addEventListener("click", async () => {
-    setBusy(true);
-    setStatus("正在批量打开详情页并提取（请勿关闭搜索标签页）…");
-    try {
-      const tab = await getActiveTab();
-      updateUiForTab(tab);
-      assertMode("list", "批量详情提取");
-      const queue = await runBatchDetailFromPopup(tab);
-      const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
-      setStatus(
-        `批量详情提取完成，链接缓存 ${queue.count} 条，详情缓存 ${records?.count ?? "?"} 条`,
+        `已提取 ${response.data.count} 条，详情缓存共 ${savedCount} 条，已写入缓存（可在「统一下载全部 JSONL」导出）`,
         "ok"
       );
       await refreshCacheStatus();
@@ -609,51 +303,19 @@ if (downloadDetailBtn) {
   downloadDetailBtn.addEventListener("click", async () => {
     const stored = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
     if (!stored?.ok || !stored.count) {
-      setStatus("详情缓存为空，请先在商品页或批量详情中提取", "warn");
+      setStatus("详情缓存为空，请先在商品页或搜索列表提取", "warn");
       return;
     }
 
     try {
       JdJsonlDownload.downloadRecords(
         stored.records,
-        stored.filename || `jd-details-${new Date().toISOString().slice(0, 10)}.jsonl`
+        stored.filename || `cn-details-${new Date().toISOString().slice(0, 10)}.jsonl`
       );
-      setStatus(`已下载详情 JSONL（${stored.count} 条）`, "ok");
+      setStatus(`已统一下载全部 JSONL（共 ${stored.count} 条）`, "ok");
     } catch (error) {
       setStatus(String(error.message || error), "error");
     }
-  });
-}
-
-if (downloadLinksBtn) {
-  downloadLinksBtn.addEventListener("click", async () => {
-    const stored = await chrome.runtime.sendMessage({ type: "GET_PRODUCT_URLS" });
-    if (!stored?.ok || !stored.count) {
-      setStatus("链接缓存为空，请先在搜索页「翻页缓存链接」", "warn");
-      return;
-    }
-
-    try {
-      JdJsonlDownload.downloadRecords(
-        stored.urls,
-        stored.filename || `jd-links-${new Date().toISOString().slice(0, 10)}.jsonl`
-      );
-      setStatus(`已下载链接 JSONL（${stored.count} 条）`, "ok");
-    } catch (error) {
-      setStatus(String(error.message || error), "error");
-    }
-  });
-}
-
-if (clearLinksBtn) {
-  clearLinksBtn.addEventListener("click", async () => {
-    const cleared = await chrome.runtime.sendMessage({ type: "CLEAR_PRODUCT_URLS" });
-    if (!cleared?.ok) {
-      setStatus(cleared?.error || "清空链接缓存失败", "error");
-      return;
-    }
-    setStatus("已清空链接缓存", "ok");
-    await refreshCacheStatus();
   });
 }
 
@@ -673,7 +335,6 @@ async function syncUiToActiveTab() {
   const tab = await getActiveTab();
   updateUiForTab(tab);
   await refreshCacheStatus();
-  await syncJobControlsFromBackground();
 }
 
 function bindTabRefresh() {
@@ -688,55 +349,5 @@ function bindTabRefresh() {
   });
 }
 
-if (pauseJobBtn) {
-  pauseJobBtn.addEventListener("click", async () => {
-    const state = await getCrawlJobState();
-    if (!state.active) return;
-    if (state.paused) {
-      await chrome.runtime.sendMessage({ type: "CRAWL_JOB_RESUME" });
-      setStatus("已继续：滚屏与抓取将恢复", "ok");
-    } else {
-      await chrome.runtime.sendMessage({ type: "CRAWL_JOB_PAUSE" });
-      setStatus("已暂停：滚屏与抓取均已暂停", "ok");
-    }
-    await syncJobControlsFromBackground();
-  });
-}
-
-if (stopJobBtn) {
-  stopJobBtn.addEventListener("click", async () => {
-    const state = await getCrawlJobState();
-    if (!state.active) {
-      setStatus("当前没有运行中的任务", "warn");
-      return;
-    }
-    await chrome.runtime.sendMessage({ type: "CRAWL_JOB_STOP" });
-    setStatus("正在结束任务…", "ok");
-    const deadline = Date.now() + 90000;
-    while (Date.now() < deadline) {
-      const s = await getCrawlJobState();
-      if (!s.active) {
-        setStatus("任务已结束", "ok");
-        break;
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    if ((await getCrawlJobState()).active) {
-      setStatus("结束超时：请刷新搜索页后重试", "error");
-    }
-    await syncJobControlsFromBackground();
-  });
-}
-
-chrome.runtime.onMessage.addListener((message) => {
-  if (message?.type === "CRAWL_JOB_STATE_CHANGED") {
-    updateJobControlsUi(message.state);
-    syncJobControlsFromBackground();
-    refreshJobStatus();
-  }
-});
-
-loadSearchSettings();
 bindTabRefresh();
 syncUiToActiveTab();
-syncJobControlsFromBackground();

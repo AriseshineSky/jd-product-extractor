@@ -42,9 +42,9 @@
           opacity: 0.65;
           cursor: wait;
         }
-        #tb-search-cache-urls-btn { background: #2563eb; }
         #tb-search-extract-list-btn { background: #059669; }
         #tb-search-extract-multi-btn { background: #047857; }
+        #tb-search-download-all-btn { background: #4b5563; }
         #taobao-search-extractor-toast {
           position: fixed;
           right: 18px;
@@ -68,11 +68,6 @@
 
     const defs = [
       {
-        id: "tb-search-cache-urls-btn",
-        text: "翻页缓存链接",
-        onClick: () => runCacheUrls(),
-      },
-      {
         id: "tb-search-extract-list-btn",
         text: "提取本页列表",
         onClick: () => runExtractList({ multiPage: false }),
@@ -80,7 +75,12 @@
       {
         id: "tb-search-extract-multi-btn",
         text: "翻页提取列表",
-        onClick: () => runExtractList({ multiPage: true, downloadAtEnd: true }),
+        onClick: () => runExtractList({ multiPage: true }),
+      },
+      {
+        id: "tb-search-download-all-btn",
+        text: "下载全部 JSONL",
+        onClick: downloadAllRecords,
       },
     ];
 
@@ -97,7 +97,7 @@
   }
 
   function setAllButtonsDisabled(disabled) {
-    ["tb-search-cache-urls-btn", "tb-search-extract-list-btn", "tb-search-extract-multi-btn"].forEach(
+    ["tb-search-extract-list-btn", "tb-search-extract-multi-btn", "tb-search-download-all-btn"].forEach(
       (id) => {
         const el = document.getElementById(id);
         if (el) el.disabled = disabled;
@@ -152,46 +152,7 @@
     return false;
   }
 
-  async function runCacheUrls() {
-    const maxPages = await getMaxPages();
-    showToast(
-      maxPages > 1
-        ? `正在平滑滚屏并翻页缓存链接（最多 ${maxPages} 页）…`
-        : "正在平滑滚屏并缓存本页链接…"
-    );
-    setAllButtonsDisabled(true);
-
-    try {
-      assertNotBlocked();
-      const result =
-        maxPages > 1
-          ? await TaobaoSearchExtractor.collectSearchUrlsMultiPage({
-              maxPages,
-              shouldContinue: window.__tbScrollShouldContinue,
-            })
-          : await TaobaoSearchExtractor.collectUrlsFromSearchPage({
-              shouldContinue: window.__tbScrollShouldContinue,
-            });
-
-      const saved = await chrome.runtime.sendMessage({
-        type: "APPEND_PRODUCT_URLS",
-        urls: result.urls,
-      });
-
-      if (!saved?.ok) throw new Error(saved?.error || "链接缓存失败");
-
-      const pageInfo = maxPages > 1 ? `（${result.pages} 页）` : "";
-      showToast(
-        `已缓存 ${result.count} 个链接${pageInfo}，链接缓存共 ${saved.count} 条`
-      );
-    } catch (error) {
-      showToast(String(error.message || error), true);
-    } finally {
-      setAllButtonsDisabled(false);
-    }
-  }
-
-  async function runExtractList({ multiPage = false, downloadAtEnd = false } = {}) {
+  async function runExtractList({ multiPage = false } = {}) {
     const maxPages = multiPage ? await getMaxPages() : 1;
     showToast(
       multiPage
@@ -212,31 +173,17 @@
               shouldContinue: window.__tbScrollShouldContinue,
             });
 
-      let savedCount = 0;
-      for (const product of result.products) {
-        const saved = await chrome.runtime.sendMessage({
-          type: "APPEND_JSONL_RECORD",
-          product,
+      let saved = null;
+      if (result.products.length) {
+        saved = await chrome.runtime.sendMessage({
+          type: "APPEND_JSONL_RECORDS",
+          products: result.products,
         });
-        if (saved?.ok) savedCount = saved.count;
       }
-
-      if (downloadAtEnd && result.products.length) {
-        const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
-        if (records?.ok && records.count) {
-          const stamp = new Date().toISOString().slice(0, 10);
-          const keyword = result.keyword || "search";
-          const safeKeyword = String(keyword).replace(/[^\w\u4e00-\u9fa5-]+/g, "_").slice(0, 40);
-          JdJsonlDownload.downloadRecords(
-            records.records,
-            records.filename || `tb-list-${stamp}-${safeKeyword}.jsonl`
-          );
-        }
-      }
+      const savedCount = saved?.count || 0;
 
       showToast(
-        `已提取 ${result.count} 条商品${multiPage ? `（${result.pages} 页）` : ""}，详情缓存共 ${savedCount} 条` +
-          (downloadAtEnd ? "，已下载 JSONL" : "")
+        `已提取 ${result.count} 条商品${multiPage ? `（${result.pages} 页）` : ""}，详情缓存共 ${savedCount} 条`
       );
     } catch (error) {
       showToast(String(error.message || error), true);
@@ -245,28 +192,19 @@
     }
   }
 
+  async function downloadAllRecords() {
+    const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
+    if (!records?.ok || !records.count) {
+      showToast("缓存为空，请先提取列表", true);
+      return;
+    }
+    JdJsonlDownload.downloadRecords(records.records, records.filename);
+    showToast(`已下载全部 JSONL（共 ${records.count} 条）`);
+  }
+
   if (!window.__taobaoSearchExtractorMessageListener) {
     window.__taobaoSearchExtractorMessageListener = true;
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      if (message?.type === "CACHE_TAOBAO_SEARCH_URLS") {
-        (async () => {
-          try {
-            if (!window.TaobaoSearchExtractor?.collectUrlsFromSearchPage) {
-              throw new Error("搜索页脚本未加载，请刷新页面后重试");
-            }
-            const opts = message.options || {};
-            const data =
-              opts.maxPages && opts.maxPages > 1
-                ? await window.TaobaoSearchExtractor.collectSearchUrlsMultiPage(opts)
-                : await window.TaobaoSearchExtractor.collectUrlsFromSearchPage(opts);
-            sendResponse({ ok: true, data });
-          } catch (error) {
-            sendResponse({ ok: false, error: String(error?.message || error) });
-          }
-        })();
-        return true;
-      }
-
       if (message?.type === "EXTRACT_TAOBAO_SEARCH_LIST") {
         (async () => {
           try {

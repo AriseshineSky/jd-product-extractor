@@ -3,49 +3,32 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>JD Product Extractor</title>
+    <title>CN Product Extractor</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
     <header>
-      <h1>JD 商品提取</h1>
+      <h1>CN 商品提取</h1>
       <p id="page-mode" class="page-mode" hidden></p>
-      <p class="hint">在 item.jd.com 商品页先滚动加载图文详情，再点击提取</p>
+      <p class="hint">商品详情页：京东 / 天猫 / 淘宝；搜索列表页：淘宝（s.taobao.com）</p>
     </header>
     <p id="unsupported-notice" class="unsupported-notice" hidden>
-      请切换到<strong>商品详情页</strong>（item.jd.com / item.taobao.com / detail.tmall.com）或<strong>搜索/分类列表页</strong>（search.jd.com、list.jd.com、s.taobao.com）后再操作。
+      请切换到<strong>商品详情页</strong>（item.jd.com / detail.tmall.com / item.taobao.com）或<strong>淘宝搜索列表页</strong>（s.taobao.com）后再操作。
     </p>
-    <div id="search-options" class="search-options" hidden>
-      <label for="search-pages">自动翻页页数（1=仅当前页）</label>
-      <input id="search-pages" type="number" min="1" max="50" value="5" />
-      <label for="detail-delay">详情页间隔（毫秒）</label>
-      <input id="detail-delay" type="number" min="500" max="15000" value="2500" />
-    </div>
     <div class="actions item-actions" hidden>
-      <button id="extract-only-btn" type="button" class="blue">只提取商品信息</button>
-      <button id="extract-btn" type="button">提取并下载 JSONL</button>
+      <button id="extract-btn" type="button">提取并写入缓存</button>
       <button id="copy-btn" type="button" disabled>复制 JSON</button>
     </div>
-    <div id="search-actions" class="actions search-actions" hidden>
-      <button id="cache-urls-btn" type="button" class="blue">翻页缓存链接</button>
-      <button id="batch-detail-btn" type="button" class="purple">批量详情提取</button>
-      <button id="deep-crawl-btn" type="button" class="green">逐一点开详情提取</button>
+    <div class="actions search-actions" hidden>
       <button id="extract-list-btn" type="button" class="green" hidden>提取搜索列表</button>
     </div>
-    <div id="job-controls" class="actions job-controls" hidden>
-      <button id="pause-job-btn" type="button" class="amber">暂停</button>
-      <button id="stop-job-btn" type="button" class="warn">结束</button>
-    </div>
     <div class="actions secondary cache-actions">
-      <button id="download-detail-btn" type="button">下载详情 JSONL</button>
-      <button id="download-links-btn" type="button">下载链接 JSONL</button>
+      <button id="download-detail-btn" type="button" class="primary">统一下载全部 JSONL</button>
     </div>
     <div class="actions secondary cache-actions">
       <button id="clear-detail-btn" type="button" class="ghost">清空详情缓存</button>
-      <button id="clear-links-btn" type="button" class="ghost">清空链接缓存</button>
     </div>
-    <p id="cache-status" class="cache-status">当前缓存：详情 0 条，链接 0 条</p>
-    <p id="job-status" class="job-status" hidden></p>
+    <p id="cache-status" class="cache-status">当前缓存：详情 0 条（最多保留 10000 条）</p>
     <p id="status" class="status"></p>
     <pre id="output" class="output" aria-live="polite"></pre>
     <script src="../src/jd-page-url.js"></script>

@@ -38,3 +38,6 @@ Thumbs.db
 
 # Optional local output (if copied into repo for debugging)
 *.jsonl
+# Python
+__pycache__/
+*.pyc

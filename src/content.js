@@ -38,8 +38,8 @@
           opacity: 0.65;
           cursor: wait;
         }
-        #jd-product-extractor-only-btn { background: #2563eb; }
         #jd-product-extractor-btn { background: #e1251b; }
+        #jd-product-extractor-download-btn { background: #4b5563; }
         #jd-product-extractor-toast {
           position: fixed;
           right: 18px;
@@ -101,21 +101,31 @@
     const panel = document.createElement("div");
     panel.id = PANEL_ID;
 
-    const onlyBtn = document.createElement("button");
-    onlyBtn.id = "jd-product-extractor-only-btn";
-    onlyBtn.type = "button";
-    onlyBtn.textContent = "只提取商品信息";
-    onlyBtn.addEventListener("click", () => runExtract(onlyBtn, { download: false }));
+    const extractBtn = document.createElement("button");
+    extractBtn.id = "jd-product-extractor-btn";
+    extractBtn.type = "button";
+    extractBtn.textContent = "提取并写入缓存";
+    extractBtn.addEventListener("click", () => runExtract(extractBtn));
 
     const downloadBtn = document.createElement("button");
-    downloadBtn.id = "jd-product-extractor-btn";
+    downloadBtn.id = "jd-product-extractor-download-btn";
     downloadBtn.type = "button";
-    downloadBtn.textContent = "提取并下载 JSONL";
-    downloadBtn.addEventListener("click", () => runExtract(downloadBtn, { download: true }));
+    downloadBtn.textContent = "下载全部 JSONL";
+    downloadBtn.addEventListener("click", downloadAllRecords);
 
+    panel.appendChild(extractBtn);
     panel.appendChild(downloadBtn);
-    panel.appendChild(onlyBtn);
     document.documentElement.appendChild(panel);
+  }
+
+  async function downloadAllRecords() {
+    const records = await chrome.runtime.sendMessage({ type: "GET_JSONL_RECORDS" });
+    if (!records?.ok || !records.count) {
+      showToast("缓存为空，请先提取商品", true);
+      return;
+    }
+    JdJsonlDownload.downloadRecords(records.records, records.filename);
+    showToast(`已下载全部 JSONL（共 ${records.count} 条）`);
   }
 
   function setPanelDisabled(disabled) {
@@ -204,9 +214,9 @@
     });
   }
 
-  async function runExtract(_button, { download = false } = {}) {
+  async function runExtract(_button) {
     setPanelDisabled(true);
-    showToast(download ? "正在提取并下载 JSONL…" : "正在提取商品信息…");
+    showToast("正在提取商品信息…");
 
     try {
       ensurePageDescriptionLoaded();
@@ -224,19 +234,11 @@
         throw new Error(saved?.error || "保存 JSONL 缓存失败");
       }
 
-      if (download) {
-        JdJsonlDownload.downloadRecords(saved.records, saved.filename);
-      }
-
       const validationHint = _validation_errors?.length
         ? `，校验提示: ${_validation_errors.join("; ")}`
         : "";
 
-      if (download) {
-        showToast(`已下载 JSONL（缓存 ${saved.count} 条）${validationHint}`);
-      } else {
-        showToast(`已提取并写入缓存（共 ${saved.count} 条）${validationHint}`);
-      }
+      showToast(`已提取并写入缓存（共 ${saved.count} 条）${validationHint}`);
     } catch (error) {
       if (error?.code !== "DESCRIPTION_NOT_LOADED") {
         showToast(String(error.message || error), true);
@@ -271,10 +273,6 @@
           product,
         });
         if (!saved?.ok) throw new Error(saved?.error || "保存缓存失败");
-      }
-
-      if (opts.download === true && saved?.records) {
-        JdJsonlDownload.downloadRecords(saved.records, saved.filename);
       }
 
       sendResponse({
